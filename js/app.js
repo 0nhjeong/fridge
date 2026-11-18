@@ -7,7 +7,7 @@
  * 1. 상수 · 기본값
  * ========================================================= */
 const STORE_KEY = 'fridge-pwa-v1'; // 저장 데이터 이름 (바꾸면 기존 데이터를 못 읽으니 그대로 두기)
-const APP_VERSION = 'v4'; // 배포할 때 sw.js의 CACHE 숫자와 같이 올리기
+const APP_VERSION = 'v5'; // 배포할 때 sw.js의 CACHE 숫자와 같이 올리기
 
 const CATEGORIES = [
   { id: 'meat', name: '육류·생선', emoji: '🥩' },
@@ -125,7 +125,8 @@ function normalize(d) {
 
   if (!Array.isArray(s.zones) || !s.zones.length) s.zones = base.zones;
   s.zones = s.zones.map((z) => {
-    const zone = { id: z.id || uid(), name: String(z.name || '구역'), type: ZONE_TYPES[z.type] ? z.type : 'fridge', hidden: !!z.hidden };
+    // 설정의 숨김 버튼을 없앴으므로, 예전에 숨겨 둔 구역도 다시 보이게 함 (안 쓰는 구역은 🗑️로 삭제)
+    const zone = { id: z.id || uid(), name: String(z.name || '구역'), type: ZONE_TYPES[z.type] ? z.type : 'fridge', hidden: false };
     zone.slots = (Array.isArray(z.slots) ? z.slots : []).map((sl) => ({ id: sl.id || uid(), name: String(sl.name || '칸'), door: !!sl.door }));
     if (!zone.slots.length) zone.slots = [{ id: uid(), name: '기본 칸', door: false }];
     return zone;
@@ -867,18 +868,17 @@ window.addEventListener('appinstalled', () => { deferredInstall = null; toast('�
 function viewSettings() {
   const standalone = window.matchMedia('(display-mode: standalone)').matches;
   let h = `<h2 class="sec">🗂️ 보관 구역 <small>김치냉장고·보조냉동고 추가 가능</small></h2><div class="card">`;
-  h += S.zones.map((z, i) => `<div class="zone-row ${z.hidden ? 'is-hidden' : ''}" data-zid="${z.id}">
-      <button class="icon-btn ${z.hidden ? '' : 'on'}" data-zm="hide" aria-pressed="${!z.hidden}" aria-label="${z.hidden ? '구역 보이기' : '구역 숨기기'}" title="${z.hidden ? '숨김 중 — 눌러서 보이기' : '보이는 중 — 눌러서 숨기기'}">${z.hidden ? '🙈' : '👁️'}</button>
+  h += S.zones.map((z, i) => `<div class="zone-row" data-zid="${z.id}">
       <input value="${esc(z.name)}" data-zf="name" aria-label="구역 이름">
       <select data-zf="type" aria-label="구역 종류">${Object.entries(ZONE_TYPES).map(([k, t]) => `<option value="${k}" ${z.type === k ? 'selected' : ''}>${t.emoji} ${t.name}</option>`).join('')}</select>
-      <button class="icon-btn" data-zm="up" ${i === 0 ? 'disabled' : ''} aria-label="위로">↑</button>
-      <button class="icon-btn" data-zm="down" ${i === S.zones.length - 1 ? 'disabled' : ''} aria-label="아래로">↓</button>
-      <button class="icon-btn" data-zm="slots" aria-label="칸 편집">🧩</button>
-      <button class="icon-btn" data-zm="del" aria-label="삭제">🗑️</button>
+      <div class="zone-btns">
+        <button class="icon-btn" data-zm="up" ${i === 0 ? 'disabled' : ''} aria-label="위로">↑</button>
+        <button class="icon-btn" data-zm="down" ${i === S.zones.length - 1 ? 'disabled' : ''} aria-label="아래로">↓</button>
+        <button class="icon-btn" data-zm="del" aria-label="삭제">🗑️</button>
+      </div>
     </div>`).join('');
   h += `<form class="zone-row" id="zoneAdd"><input name="zname" placeholder="새 구역 (예: 김치냉장고)"><select name="ztype">${Object.entries(ZONE_TYPES).map(([k, t]) => `<option value="${k}">${t.emoji} ${t.name}</option>`).join('')}</select><button class="btn primary sm" type="submit">추가</button></form>
-    <p class="hint">👁️ 버튼으로 안 쓰는 구역(예: 김치냉장고)을 숨길 수 있어요. 숨긴 구역은 냉장고 탭·등록 화면에서 빠지고, 안에 남은 재료는 임박 알림에 계속 보여요.</p>
-    <p class="hint">🧩 버튼으로 칸을 추가·이름 변경·순서 변경·삭제할 수 있어요. '종류'가 소비기한 계산 기준이에요.</p></div>`;
+    <p class="hint">'종류'가 소비기한 계산 기준이에요. 칸 추가·이름 변경은 냉장고 탭의 각 구역 화면에서 할 수 있어요.</p></div>`;
 
   h += `<h2 class="sec">📅 소비기한 기준표 <small>오늘 + N일</small></h2><div class="card"><table class="rules"><thead><tr><th>카테고리</th>${Object.values(ZONE_TYPES).map((t) => `<th>${t.name}</th>`).join('')}<th>개봉 후</th></tr></thead><tbody>
     ${CATEGORIES.map((c) => `<tr><td>${c.emoji} ${c.name}</td>${Object.keys(ZONE_TYPES).map((t) => `<td><input type="number" inputmode="numeric" min="0" data-rule="${t}.${c.id}" value="${ruleDays(t, c.id)}"></td>`).join('')}<td><input type="number" inputmode="numeric" min="0" data-open="${c.id}" value="${openDays(c.id)}"></td></tr>`).join('')}
@@ -912,14 +912,6 @@ function mountSettings(v) {
       const m = b.dataset.zm;
       if (m === 'up' && i > 0) { [S.zones[i - 1], S.zones[i]] = [S.zones[i], S.zones[i - 1]]; commit(); }
       else if (m === 'down' && i < S.zones.length - 1) { [S.zones[i + 1], S.zones[i]] = [S.zones[i], S.zones[i + 1]]; commit(); }
-      else if (m === 'slots') slotManager(z.id);
-      else if (m === 'hide') {
-        if (!z.hidden && visibleZones().length <= 1) { toast('보이는 구역이 최소 1개는 있어야 해요'); return; }
-        z.hidden = !z.hidden;
-        commit();
-        const left = S.items.filter((it) => it.zoneId === z.id && it.count > 0).length;
-        toast(z.hidden ? `'${z.name}' 숨김${left ? ` · 남은 재료 ${left}개는 임박 알림에 계속 보여요` : ''}` : `'${z.name}' 다시 보이기`);
-      }
       else if (m === 'del') {
         if (S.zones.length <= 1) { toast('구역은 최소 1개 필요해요'); return; }
         if (!z.hidden && visibleZones().length <= 1) { toast('보이는 구역이 최소 1개는 있어야 해요'); return; }

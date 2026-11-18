@@ -271,7 +271,8 @@ details.steps p { margin: 6px 0 8px; font-size: 14px; }
 /* ===== 설정 ===== */
 .zone-row { display: flex; gap: 6px; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--line); flex-wrap: wrap; }
 .zone-row:last-child { border-bottom: 0; }
-.zone-row.is-hidden input, .zone-row.is-hidden select { opacity: .5; }
+/* ↑ ↓ 🗑️ 는 한 묶음: 폭이 좁으면 묶음째 아랫줄 오른쪽으로 내려감 */
+.zone-btns { display: flex; gap: 6px; flex: none; margin-left: auto; }
 .zone-row input { flex: 1 1 120px; min-width: 0; }
 .zone-row select { flex: 0 0 82px; padding: 0 6px; }
 .icon-btn { flex: none; width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line); background: var(--card2); font-size: 15px; }

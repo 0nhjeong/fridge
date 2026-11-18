@@ -4,7 +4,7 @@
  * 동작 방식: 인터넷이 되면 항상 서버의 최신 파일을 쓰고(network-first),
  *           인터넷이 안 되거나 4초 넘게 느리면 저장해 둔 파일로 실행해요(오프라인 지원).
  */
-const CACHE = 'fridge-pwa-v4';
+const CACHE = 'fridge-pwa-v5';
 const ASSETS = [
   './',
   './index.html',
