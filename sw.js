@@ -1,7 +1,10 @@
 /* 냉장고 소분 관리 - Service Worker
- * 코드를 수정해서 다시 배포할 때는 CACHE 이름의 숫자를 올려 주세요. (v1 → v2)
+ * 코드를 수정해서 다시 배포할 때는 CACHE 이름의 숫자를 올리고, js/app.js의 APP_VERSION도 같은 숫자로 맞춰 주세요.
+ *
+ * 동작 방식: 인터넷이 되면 항상 서버의 최신 파일을 쓰고(network-first),
+ *           인터넷이 안 되거나 4초 넘게 느리면 저장해 둔 파일로 실행해요(오프라인 지원).
  */
-const CACHE = 'fridge-pwa-v3';
+const CACHE = 'fridge-pwa-v4';
 const ASSETS = [
   './',
   './index.html',
@@ -14,9 +17,15 @@ const ASSETS = [
   './icons/icon-512.png',
   './icons/icon-maskable-512.png'
 ];
+const TIMEOUT_MS = 4000;
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // cache: 'reload' → 브라우저 HTTP 캐시(깃허브 10분 캐시)를 건너뛰고 서버에서 새로 받음
+  e.waitUntil(
+    caches.open(CACHE)
+      .then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -27,30 +36,30 @@ self.addEventListener('activate', (e) => {
   );
 });
 
-// 같은 출처의 GET 요청만 처리: 캐시 먼저 보여주고, 뒤에서 최신 파일로 갱신(stale-while-revalidate)
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return; // 만개의레시피 등 외부 링크는 건드리지 않음
 
-  e.respondWith(
-    caches.open(CACHE).then(async (cache) => {
-      const cached = await cache.match(req, { ignoreSearch: true });
-      const network = fetch(req)
-        .then((res) => {
-          if (res && res.ok) cache.put(req, res.clone());
-          return res;
-        })
-        .catch(() => null);
-      if (cached) {
-        e.waitUntil(network);
-        return cached;
-      }
-      const res = await network;
-      if (res) return res;
-      if (req.mode === 'navigate') return cache.match('./index.html');
-      return new Response('오프라인 상태입니다.', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
-    })
-  );
+  e.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    // no-cache → 서버에 '바뀌었나요?'를 매번 확인 (안 바뀌었으면 짧은 304 응답이라 빠름)
+    const net = fetch(url.href, { cache: 'no-cache', credentials: 'same-origin' }).then((res) => {
+      if (res && res.ok) cache.put(url.href, res.clone());
+      return res;
+    });
+    const timeout = new Promise((r) => setTimeout(() => r(null), TIMEOUT_MS));
+    let res = await Promise.race([net.catch(() => null), timeout]);
+    if (res) return res;
+
+    const cached = (await cache.match(url.href, { ignoreSearch: true }))
+      || (req.mode === 'navigate' ? await cache.match(new URL('./index.html', self.registration.scope).href) : null);
+    if (cached) {
+      e.waitUntil(net.catch(() => {})); // 느린 네트워크면 뒤에서 마저 받아 다음 실행 때 반영
+      return cached;
+    }
+    res = await net.catch(() => null);
+    return res || new Response('오프라인 상태입니다.', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+  })());
 });
