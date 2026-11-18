@@ -65,11 +65,16 @@ function defaultSlotsFor(type) {
   if (type === 'room') return [n('선반'), n('바구니')];
   return [n('상칸'), n('중칸'), n('하칸'), n('야채칸'), n('문쪽(소스·음료)', true)];
 }
+function kimchiZone() {
+  const n = (name) => ({ id: uid(), name, door: false });
+  return { id: 'z_kimchi', name: '김치냉장고', type: 'fridge', hidden: false, slots: [n('상칸'), n('중칸'), n('하칸')] };
+}
 function defaultZones() {
   return [
-    { id: 'z_fridge', name: '냉장실', type: 'fridge', slots: defaultSlotsFor('fridge') },
-    { id: 'z_freezer', name: '냉동실', type: 'freezer', slots: defaultSlotsFor('freezer') },
-    { id: 'z_room', name: '실온(팬트리)', type: 'room', slots: defaultSlotsFor('room') }
+    { id: 'z_fridge', name: '냉장실', type: 'fridge', hidden: false, slots: defaultSlotsFor('fridge') },
+    { id: 'z_freezer', name: '냉동실', type: 'freezer', hidden: false, slots: defaultSlotsFor('freezer') },
+    kimchiZone(),
+    { id: 'z_room', name: '실온(팬트리)', type: 'room', hidden: false, slots: defaultSlotsFor('room') }
   ];
 }
 
@@ -103,7 +108,8 @@ function defaultState() {
     rules: clone(DEFAULT_RULES),
     openRules: { ...DEFAULT_OPEN_RULES },
     ui: { tab: 'fridge', zoneId: 'z_fridge', mode: 'slot', open: {}, recipeTag: 'all', recipeOwned: true, addMode: 'single', combo: [], lastZoneId: '', lastSlotId: '' },
-    lastBackup: null
+    lastBackup: null,
+    migrations: { kimchi: true } // 이미 적용된 데이터 업데이트 기록
   };
 }
 
@@ -118,11 +124,21 @@ function normalize(d) {
 
   if (!Array.isArray(s.zones) || !s.zones.length) s.zones = base.zones;
   s.zones = s.zones.map((z) => {
-    const zone = { id: z.id || uid(), name: String(z.name || '구역'), type: ZONE_TYPES[z.type] ? z.type : 'fridge' };
+    const zone = { id: z.id || uid(), name: String(z.name || '구역'), type: ZONE_TYPES[z.type] ? z.type : 'fridge', hidden: !!z.hidden };
     zone.slots = (Array.isArray(z.slots) ? z.slots : []).map((sl) => ({ id: sl.id || uid(), name: String(sl.name || '칸'), door: !!sl.door }));
     if (!zone.slots.length) zone.slots = [{ id: uid(), name: '기본 칸', door: false }];
     return zone;
   });
+  // 업데이트: 기존 사용자 데이터에 김치냉장고를 냉동실과 실온 사이에 한 번만 추가 (삭제하면 다시 생기지 않음)
+  s.migrations = { ...(d.migrations || {}) };
+  if (!s.migrations.kimchi) {
+    s.migrations.kimchi = true;
+    if (!s.zones.some((z) => /김치/.test(z.name))) {
+      const roomIdx = s.zones.findIndex((z) => z.id === 'z_room');
+      s.zones.splice(roomIdx >= 0 ? roomIdx : s.zones.length, 0, kimchiZone());
+    }
+  }
+  if (s.zones.every((z) => z.hidden)) s.zones[0].hidden = false;
 
   s.items = (Array.isArray(s.items) ? s.items : []).filter((i) => i && i.name).map((i) => {
     const it = { id: i.id || uid(), name: String(i.name), cat: CAT[i.cat] ? i.cat : 'etc', zoneId: i.zoneId, slotId: i.slotId,
@@ -135,7 +151,7 @@ function normalize(d) {
   });
   s.shopping = (Array.isArray(s.shopping) ? s.shopping : []).filter((x) => x && x.name).map((x) => ({ id: x.id || uid(), name: String(x.name), done: !!x.done }));
   s.freq = Array.isArray(d.freq) ? d.freq.filter((f) => f && f.name).map((f) => ({ ...f, id: f.id || uid() })) : base.freq;
-  if (!s.zones.find((z) => z.id === s.ui.zoneId)) s.ui.zoneId = s.zones[0].id;
+  if (!s.zones.find((z) => z.id === s.ui.zoneId && !z.hidden)) s.ui.zoneId = s.zones.find((z) => !z.hidden).id;
   return s;
 }
 
@@ -169,12 +185,14 @@ const zoneById = (id) => S.zones.find((z) => z.id === id);
 const slotOf = (z, id) => (z ? z.slots.find((s) => s.id === id) : null);
 const itemById = (id) => S.items.find((i) => i.id === id);
 function locText(it) { const z = zoneById(it.zoneId); const s = slotOf(z, it.slotId); return `${z ? z.name : '?'} · ${s ? s.name : '?'}`; }
-function firstZoneOfType(t) { return S.zones.find((z) => z.type === t) || S.zones[0]; }
+// 숨긴 구역(예: 김치냉장고)은 목록·선택지에서 빠짐. 안에 있던 재료는 임박 알림·전체 임박순에 계속 보임
+function visibleZones(keepId) { return S.zones.filter((z) => !z.hidden || z.id === keepId); }
+function firstZoneOfType(t) { const v = visibleZones(); return v.find((z) => z.type === t) || v[0] || S.zones[0]; }
 function findSlotByHint(z, hint) {
   if (!hint) return z.slots[0];
   return z.slots.find((s) => s.name === hint) || z.slots.find((s) => s.name.startsWith(hint) || hint.startsWith(s.name)) || z.slots[0];
 }
-function currentZone() { return zoneById(S.ui.zoneId) || S.zones[0]; }
+function currentZone() { const z = zoneById(S.ui.zoneId); return z && !z.hidden ? z : visibleZones()[0]; }
 
 function ruleDays(zoneType, cat) { const v = (S.rules[zoneType] || {})[cat]; return Number.isFinite(+v) ? +v : 7; }
 function openDays(cat) { const v = S.openRules[cat]; return Number.isFinite(+v) ? +v : 30; }
@@ -323,8 +341,8 @@ function parseBulkLine(line) {
   const left = [];
   for (const t of rest) {
     if (!r.zone) {
-      const z = S.zones.find((zz) => zz.name === t || zz.name.replace(/\(.*\)/, '') === t)
-        || (t === '김냉' ? S.zones.find((zz) => /김치/.test(zz.name)) : null);
+      const z = visibleZones().find((zz) => zz.name === t || zz.name.replace(/\(.*\)/, '') === t)
+        || (t === '김냉' ? visibleZones().find((zz) => /김치/.test(zz.name)) : null);
       if (z) { r.zone = z; continue; }
       if (ZONE_WORDS[t]) { r.zone = firstZoneOfType(ZONE_WORDS[t]); continue; }
     }
@@ -337,7 +355,7 @@ function parseBulkLine(line) {
     if (!r.slotToken) {
       if (r.zone) { const s = slotMatch(r.zone, t); if (s) { r.slot = s; r.slotToken = t; continue; } }
       else {
-        for (const z of S.zones) { const s = slotMatch(z, t); if (s) { r.zone = z; r.slot = s; r.slotToken = t; break; } }
+        for (const z of visibleZones()) { const s = slotMatch(z, t); if (s) { r.zone = z; r.slot = s; r.slotToken = t; break; } }
         if (r.slotToken) continue;
       }
     }
@@ -347,7 +365,7 @@ function parseBulkLine(line) {
   if (!name) return null;
   const cat = guessCategory(name) || 'etc';
   if (!r.zone) {
-    const lz = zoneById(S.ui.lastZoneId);
+    const lz = visibleZones().find((z) => z.id === S.ui.lastZoneId);
     r.zone = cat === 'meat' ? firstZoneOfType('freezer') : (lz || firstZoneOfType('fridge'));
   }
   if (!r.slot) r.slot = r.zone.slots[0];
@@ -490,7 +508,7 @@ function viewFridge() {
     h += '<p class="hint">🔴 D-3 이하 · 🟡 D-7 이하 · 🟢 여유 — 개봉한 재료는 개봉일 기준도 함께 계산해요.</p>';
     return h;
   }
-  h += `<div class="chips scroll" style="margin-bottom:10px">${S.zones.map((z) => {
+  h += `<div class="chips scroll" style="margin-bottom:10px">${visibleZones().map((z) => {
     const its = S.items.filter((i) => i.zoneId === z.id && i.count > 0);
     const red = its.filter((i) => dueInfo(i).level === 'red').length;
     return `<button class="chip ${z.id === S.ui.zoneId ? 'on' : ''} ${red ? 'lv-red' : ''}" data-act="zone" data-zone="${z.id}">${ZONE_TYPES[z.type].emoji} ${esc(z.name)} <span class="n">${its.length}</span></button>`;
@@ -581,7 +599,7 @@ function moveSheet(it) {
     let days = ruleDays(z.type, it.cat);
     if (thaw) days = Math.min(days, THAW_MAX[it.cat] ?? THAW_MAX.etc);
     root.innerHTML = `<div class="form">
-      <div class="fld"><span>옮길 구역</span><div class="chips">${S.zones.map((zz) => `<button class="chip ${zz.id === zid ? 'on' : ''}" data-z="${zz.id}">${ZONE_TYPES[zz.type].emoji} ${esc(zz.name)}</button>`).join('')}</div></div>
+      <div class="fld"><span>옮길 구역</span><div class="chips">${visibleZones(it.zoneId).map((zz) => `<button class="chip ${zz.id === zid ? 'on' : ''}" data-z="${zz.id}">${ZONE_TYPES[zz.type].emoji} ${esc(zz.name)}</button>`).join('')}</div></div>
       <label class="check"><input type="checkbox" id="recalc" ${typeChanged ? 'checked' : ''}> 소비기한 새로 계산 → ${shortDate(addDays(todayStr(), days))} (+${days}일${thaw ? ', 해동 기준' : ''})</label>
       <div class="fld"><span>칸 선택 — 누르면 바로 이동해요</span><div class="slot-grid">${z.slots.map((s) => `<button data-s="${s.id}" class="${z.id === it.zoneId && s.id === it.slotId ? 'cur' : ''}">${s.door ? '🚪 ' : ''}${esc(s.name)}</button>`).join('')}</div></div></div>`;
     root.querySelectorAll('[data-z]').forEach((b) => b.addEventListener('click', () => { zid = b.dataset.z; draw(root); }));
@@ -611,7 +629,7 @@ function itemFormHTML(it, isEdit) {
     <label class="fld"><span>재료 이름</span><input name="name" value="${esc(it.name)}" placeholder="예: 삼겹살" enterkeyhint="next"></label>
     <div class="fld"><span>카테고리</span><div class="chips cats">${CATEGORIES.map((c) => `<button type="button" class="chip ${c.id === it.cat ? 'on' : ''}" data-cat="${c.id}">${c.emoji} ${c.name}</button>`).join('')}</div></div>
     <div class="row2">
-      <label class="fld"><span>보관 구역</span><select name="zoneId">${S.zones.map((zz) => `<option value="${zz.id}" ${zz.id === z.id ? 'selected' : ''}>${ZONE_TYPES[zz.type].emoji} ${esc(zz.name)}</option>`).join('')}</select></label>
+      <label class="fld"><span>보관 구역</span><select name="zoneId">${visibleZones(z.id).map((zz) => `<option value="${zz.id}" ${zz.id === z.id ? 'selected' : ''}>${ZONE_TYPES[zz.type].emoji} ${esc(zz.name)}</option>`).join('')}</select></label>
       <label class="fld"><span>칸</span><select name="slotId"></select></label>
     </div>
     <div class="row3">
@@ -736,7 +754,7 @@ function mountAdd(v) {
     return;
   }
   const box = $('#addFormBox', v);
-  const lz = zoneById(S.ui.lastZoneId) || currentZone();
+  const lz = visibleZones().find((z) => z.id === S.ui.lastZoneId) || currentZone();
   const base = { name: '', cat: 'etc', zoneId: lz.id, slotId: slotOf(lz, S.ui.lastSlotId) ? S.ui.lastSlotId : lz.slots[0].id, size: '', count: 1, unit: '팩', expiry: '', opened: '', memo: '' };
   const pre = pendingPrefill; pendingPrefill = null;
   const it = { ...base, ...(pre ? pre.data : {}) };
@@ -848,7 +866,8 @@ window.addEventListener('appinstalled', () => { deferredInstall = null; toast('�
 function viewSettings() {
   const standalone = window.matchMedia('(display-mode: standalone)').matches;
   let h = `<h2 class="sec">🗂️ 보관 구역 <small>김치냉장고·보조냉동고 추가 가능</small></h2><div class="card">`;
-  h += S.zones.map((z, i) => `<div class="zone-row" data-zid="${z.id}">
+  h += S.zones.map((z, i) => `<div class="zone-row ${z.hidden ? 'is-hidden' : ''}" data-zid="${z.id}">
+      <button class="icon-btn ${z.hidden ? '' : 'on'}" data-zm="hide" aria-pressed="${!z.hidden}" aria-label="${z.hidden ? '구역 보이기' : '구역 숨기기'}" title="${z.hidden ? '숨김 중 — 눌러서 보이기' : '보이는 중 — 눌러서 숨기기'}">${z.hidden ? '🙈' : '👁️'}</button>
       <input value="${esc(z.name)}" data-zf="name" aria-label="구역 이름">
       <select data-zf="type" aria-label="구역 종류">${Object.entries(ZONE_TYPES).map(([k, t]) => `<option value="${k}" ${z.type === k ? 'selected' : ''}>${t.emoji} ${t.name}</option>`).join('')}</select>
       <button class="icon-btn" data-zm="up" ${i === 0 ? 'disabled' : ''} aria-label="위로">↑</button>
@@ -857,6 +876,7 @@ function viewSettings() {
       <button class="icon-btn" data-zm="del" aria-label="삭제">🗑️</button>
     </div>`).join('');
   h += `<form class="zone-row" id="zoneAdd"><input name="zname" placeholder="새 구역 (예: 김치냉장고)"><select name="ztype">${Object.entries(ZONE_TYPES).map(([k, t]) => `<option value="${k}">${t.emoji} ${t.name}</option>`).join('')}</select><button class="btn primary sm" type="submit">추가</button></form>
+    <p class="hint">👁️ 버튼으로 안 쓰는 구역(예: 김치냉장고)을 숨길 수 있어요. 숨긴 구역은 냉장고 탭·등록 화면에서 빠지고, 안에 남은 재료는 임박 알림에 계속 보여요.</p>
     <p class="hint">🧩 버튼으로 칸을 추가·이름 변경·순서 변경·삭제할 수 있어요. '종류'가 소비기한 계산 기준이에요.</p></div>`;
 
   h += `<h2 class="sec">📅 소비기한 기준표 <small>오늘 + N일</small></h2><div class="card"><table class="rules"><thead><tr><th>카테고리</th>${Object.values(ZONE_TYPES).map((t) => `<th>${t.name}</th>`).join('')}<th>개봉 후</th></tr></thead><tbody>
@@ -892,10 +912,18 @@ function mountSettings(v) {
       if (m === 'up' && i > 0) { [S.zones[i - 1], S.zones[i]] = [S.zones[i], S.zones[i - 1]]; commit(); }
       else if (m === 'down' && i < S.zones.length - 1) { [S.zones[i + 1], S.zones[i]] = [S.zones[i], S.zones[i + 1]]; commit(); }
       else if (m === 'slots') slotManager(z.id);
+      else if (m === 'hide') {
+        if (!z.hidden && visibleZones().length <= 1) { toast('보이는 구역이 최소 1개는 있어야 해요'); return; }
+        z.hidden = !z.hidden;
+        commit();
+        const left = S.items.filter((it) => it.zoneId === z.id && it.count > 0).length;
+        toast(z.hidden ? `'${z.name}' 숨김${left ? ` · 남은 재료 ${left}개는 임박 알림에 계속 보여요` : ''}` : `'${z.name}' 다시 보이기`);
+      }
       else if (m === 'del') {
         if (S.zones.length <= 1) { toast('구역은 최소 1개 필요해요'); return; }
+        if (!z.hidden && visibleZones().length <= 1) { toast('보이는 구역이 최소 1개는 있어야 해요'); return; }
         const its = S.items.filter((it) => it.zoneId === z.id);
-        const target = S.zones.find((zz) => zz !== z);
+        const target = visibleZones().find((zz) => zz !== z) || S.zones.find((zz) => zz !== z);
         const msg = its.length ? `'${z.name}' 구역을 삭제할까요?\n안의 재료 ${its.length}개는 '${target.name} · ${target.slots[0].name}'으로 옮겨져요.` : `'${z.name}' 구역을 삭제할까요?`;
         if (!confirm(msg)) return;
         its.forEach((it) => { it.zoneId = target.id; it.slotId = target.slots[0].id; });
