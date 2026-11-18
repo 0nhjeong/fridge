@@ -6,7 +6,8 @@
 /* =========================================================
  * 1. 상수 · 기본값
  * ========================================================= */
-const STORE_KEY = 'fridge-pwa-v1';
+const STORE_KEY = 'fridge-pwa-v1'; // 저장 데이터 이름 (바꾸면 기존 데이터를 못 읽으니 그대로 두기)
+const APP_VERSION = 'v4'; // 배포할 때 sw.js의 CACHE 숫자와 같이 올리기
 
 const CATEGORIES = [
   { id: 'meat', name: '육류·생선', emoji: '🥩' },
@@ -508,7 +509,7 @@ function viewFridge() {
     h += '<p class="hint">🔴 D-3 이하 · 🟡 D-7 이하 · 🟢 여유 — 개봉한 재료는 개봉일 기준도 함께 계산해요.</p>';
     return h;
   }
-  h += `<div class="chips scroll" style="margin-bottom:10px">${visibleZones().map((z) => {
+  h += `<div class="chips" style="margin-bottom:10px">${visibleZones().map((z) => {
     const its = S.items.filter((i) => i.zoneId === z.id && i.count > 0);
     const red = its.filter((i) => dueInfo(i).level === 'red').length;
     return `<button class="chip ${z.id === S.ui.zoneId ? 'on' : ''} ${red ? 'lv-red' : ''}" data-act="zone" data-zone="${z.id}">${ZONE_TYPES[z.type].emoji} ${esc(z.name)} <span class="n">${its.length}</span></button>`;
@@ -895,7 +896,7 @@ function viewSettings() {
   h += `<h2 class="sec">📱 앱 설치</h2><div class="card">${standalone ? '<p class="hint" style="margin:0">✅ 앱으로 실행 중이에요.</p>'
     : deferredInstall ? '<button class="btn primary block" data-act="install">홈 화면에 앱 설치</button>'
       : '<p class="hint" style="margin:0">크롬 오른쪽 위 ⋮ 메뉴 → <b>홈 화면에 추가</b>(또는 <b>앱 설치</b>)를 누르세요. https 주소에서 열어야 설치 메뉴가 떠요.</p>'}</div>
-    <p class="hint" style="text-align:center">레시피 ${window.RECIPES.length}종 내장 · 오프라인 사용 가능</p>`;
+    <p class="hint" style="text-align:center">앱 버전 ${APP_VERSION} · 레시피 ${window.RECIPES.length}종 내장 · 오프라인 사용 가능</p>`;
   return h;
 }
 
@@ -1111,6 +1112,18 @@ document.addEventListener('click', (e) => {
  * ========================================================= */
 render();
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch((err) => console.warn('SW 등록 실패', err)); });
+  // 새 버전이 설치되면 한 번 자동 새로고침 → 앱을 껐다 켜지 않아도 바로 최신 화면
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading || sheetOpen) return; // 첫 설치이거나 입력 중이면 건너뜀
+    reloading = true; saveNow(); location.reload();
+  });
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').then((reg) => {
+      // 안드로이드는 앱을 닫아도 백그라운드에 남아 있는 경우가 많아서, 다시 볼 때마다 업데이트 확인
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
+    }).catch((err) => console.warn('SW 등록 실패', err));
+  });
 }
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
