@@ -1,7 +1,7 @@
 /* 냉장고 소분 관리 - Service Worker
  * 코드를 수정해서 다시 배포할 때는 CACHE 이름의 숫자를 올려 주세요. (v1 → v2)
  */
-const CACHE = 'fridge-pwa-v1';
+const CACHE = 'fridge-pwa-v2';
 const ASSETS = [
   './',
   './index.html',

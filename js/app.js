@@ -17,8 +17,14 @@ const CATEGORIES = [
   { id: 'sauce', name: '소스·양념', emoji: '🧂' },
   { id: 'drink', name: '음료', emoji: '🧃' },
   { id: 'grain', name: '곡물·면·가공', emoji: '🍚' },
+  { id: 'fruit', name: '과일', emoji: '🍎' },
   { id: 'etc', name: '기타', emoji: '📦' }
 ];
+
+// 단위 선택 목록과 카테고리별 기본 단위 (선택 후 직접 바꿀 수 있음)
+const UNITS = ['팩', '개', '봉', '병', '통', '모', '단'];
+const DEFAULT_UNIT_BY_CAT = { fruit: '개', egg: '개', root: '개' };
+const defaultUnit = (cat) => DEFAULT_UNIT_BY_CAT[cat] || '팩';
 const CAT = Object.fromEntries(CATEGORIES.map((c) => [c.id, c]));
 
 const ZONE_TYPES = {
@@ -29,12 +35,12 @@ const ZONE_TYPES = {
 
 // 보관 구역 × 카테고리 → 권장 소비기한(오늘 + N일)
 const DEFAULT_RULES = {
-  fridge: { meat: 3, veg: 5, root: 14, egg: 21, dairy: 7, sauce: 60, drink: 7, grain: 7, etc: 7 },
-  freezer: { meat: 30, veg: 30, root: 30, egg: 30, dairy: 30, sauce: 30, drink: 30, grain: 30, etc: 30 },
-  room: { meat: 1, veg: 3, root: 14, egg: 14, dairy: 3, sauce: 180, drink: 90, grain: 90, etc: 30 }
+  fridge: { meat: 3, veg: 5, root: 14, egg: 21, dairy: 7, sauce: 60, drink: 7, grain: 7, fruit: 7, etc: 7 },
+  freezer: { meat: 30, veg: 30, root: 30, egg: 30, dairy: 30, sauce: 30, drink: 30, grain: 30, fruit: 30, etc: 30 },
+  room: { meat: 1, veg: 3, root: 14, egg: 14, dairy: 3, sauce: 180, drink: 90, grain: 90, fruit: 5, etc: 30 }
 };
 // 개봉 후 권장 사용 일수 (개봉일 + N일)
-const DEFAULT_OPEN_RULES = { meat: 2, veg: 3, root: 7, egg: 7, dairy: 5, sauce: 60, drink: 7, grain: 14, etc: 30 };
+const DEFAULT_OPEN_RULES = { meat: 2, veg: 3, root: 7, egg: 7, dairy: 5, sauce: 60, drink: 7, grain: 14, fruit: 3, etc: 30 };
 // 냉동 → 냉장 해동 시 최대 일수
 const THAW_MAX = { meat: 2, veg: 2, etc: 3 };
 
@@ -211,7 +217,8 @@ const CAT_KEYWORDS = [
   ['grain', ['쌀', '햇반', '즉석밥', '국수', '소면', '라면', '파스타', '떡', '빵', '만두', '어묵', '오뎅', '시리얼', '가루', '참치캔', '통조림']],
   ['meat', ['고기', '삼겹', '목살', '앞다리', '항정', '갈비', '닭', '오리', '차돌', '불고기', '베이컨', '햄', '스팸', '소시지', '소세지', '생선', '고등어', '갈치', '삼치', '연어', '오징어', '새우', '조개', '바지락', '홍합', '멸치', '대구', '동태', '명태', '낙지', '주꾸미', '쭈꾸미', '꽃게', '전복', '굴', '참치', '육포']],
   ['root', ['감자', '고구마', '당근', '무', '양파', '마늘', '생강', '연근', '우엉', '비트', '토란']],
-  ['veg', ['두부', '대파', '쪽파', '부추', '시금치', '상추', '깻잎', '배추', '양배추', '애호박', '호박', '오이', '브로콜리', '콩나물', '숙주', '버섯', '파프리카', '피망', '고추', '가지', '토마토', '미나리', '청경채', '반찬', '김치', '나물', '샐러드', '미역', '사과', '바나나', '딸기', '과일']]
+  ['fruit', ['과일', '사과', '바나나', '딸기', '포도', '샤인머스캣', '귤', '감귤', '한라봉', '오렌지', '키위', '참외', '수박', '멜론', '복숭아', '자두', '체리', '블루베리', '망고', '파인애플', '레몬', '자몽', '아보카도', '단감', '홍시', '곶감', '석류']],
+  ['veg', ['두부', '대파', '쪽파', '부추', '시금치', '상추', '깻잎', '배추', '양배추', '애호박', '호박', '오이', '브로콜리', '콩나물', '숙주', '버섯', '파프리카', '피망', '고추', '가지', '토마토', '미나리', '청경채', '반찬', '김치', '나물', '샐러드', '미역']]
 ];
 // 한 글자 키워드(무·떡·닭 등)는 '단무지', '양파' 같은 오인식을 막으려고 앞/뒤에 붙을 때만 인정
 function kwMatch(name, kw) { return kw.length === 1 ? (name.startsWith(kw) || name.endsWith(kw)) : name.includes(kw); }
@@ -345,7 +352,7 @@ function parseBulkLine(line) {
   }
   if (!r.slot) r.slot = r.zone.slots[0];
   const expiry = r.expiry || addDays(todayStr(), ruleDays(r.zone.type, cat));
-  return { name, cat, zoneId: r.zone.id, slotId: r.slot.id, size: r.size, count: r.count ?? 1, unit: r.unit || '팩', expiry, opened: '', memo: '' };
+  return { name, cat, zoneId: r.zone.id, slotId: r.slot.id, size: r.size, count: r.count ?? 1, unit: r.unit || defaultUnit(cat), expiry, opened: '', memo: '' };
 }
 
 /* =========================================================
@@ -592,6 +599,12 @@ function moveSheet(it) {
 }
 
 /* ---------- 8-3. 재료 입력 폼 (등록/수정 공용) ---------- */
+// 기본 단위 목록 + (일괄 입력 등으로 들어온 '캔', '줄' 같은 다른 단위도 유지)
+function unitOptions(selected) {
+  const list = UNITS.includes(selected) || !selected ? UNITS : [...UNITS, selected];
+  return list.map((u) => `<option value="${esc(u)}" ${u === selected ? 'selected' : ''}>${esc(u)}</option>`).join('');
+}
+
 function itemFormHTML(it, isEdit) {
   const z = zoneById(it.zoneId) || S.zones[0];
   return `<form class="form" autocomplete="off" novalidate>
@@ -604,7 +617,7 @@ function itemFormHTML(it, isEdit) {
     <div class="row3">
       <label class="fld"><span>1팩 용량</span><input name="size" value="${esc(it.size)}" placeholder="120g"></label>
       <label class="fld"><span>수량</span><input name="count" type="number" inputmode="decimal" min="0" step="1" value="${esc(it.count)}"></label>
-      <label class="fld"><span>단위</span><input name="unit" value="${esc(it.unit || '팩')}" list="unitList"></label>
+      <label class="fld"><span>단위</span><select name="unit">${unitOptions(it.unit || defaultUnit(it.cat))}</select></label>
     </div>
     <div class="fld"><span>소비기한 <em class="exp-hint"></em></span>
       <div class="inline"><input type="date" name="expiry" value="${esc(it.expiry)}"><button type="button" class="btn ghost sm" data-f="auto">↺ 자동</button></div>
@@ -624,7 +637,10 @@ function bindItemForm(form, it, onSave) {
   let cat = it.cat;
   let catTouched = !!it.name;
   let expTouched = !!it.expiry;
+  let unitTouched = !!it.name; // 수정 화면·입고 등 이미 정해진 단위는 건드리지 않음
   const zoneSel = f.zoneId; const slotSel = f.slotId;
+  const applyDefaultUnit = () => { if (!unitTouched) f.unit.value = defaultUnit(cat); };
+  f.unit.addEventListener('change', () => { unitTouched = true; });
   const fillSlots = (keepId) => {
     const z = zoneById(zoneSel.value);
     slotSel.innerHTML = z.slots.map((s) => `<option value="${s.id}">${s.door ? '🚪 ' : ''}${esc(s.name)}</option>`).join('');
@@ -649,11 +665,11 @@ function bindItemForm(form, it, onSave) {
   f.name.addEventListener('input', () => {
     if (catTouched) return;
     const g = guessCategory(f.name.value);
-    if (g && g !== cat) { cat = g; update(); }
+    if (g && g !== cat) { cat = g; applyDefaultUnit(); update(); }
   });
   form.addEventListener('click', (e) => {
     const c = e.target.closest('[data-cat]');
-    if (c) { cat = c.dataset.cat; catTouched = true; update(); return; }
+    if (c) { cat = c.dataset.cat; catTouched = true; applyDefaultUnit(); update(); return; }
     const dd = e.target.closest('[data-days]');
     if (dd) { expTouched = true; f.expiry.value = dd.dataset.days === '' ? '' : addDays(todayStr(), +dd.dataset.days); return; }
     const b = e.target.closest('[data-f]'); if (!b) return;
