@@ -1,5 +1,5 @@
-/* 냉장고 소분·재고 관리 PWA - 메인 로직 (Vanilla JS)
- * 데이터는 localStorage('fridge-pwa-v1')에 자동 저장됩니다.
+/* 냉털집사 (냉장고 소분·재고 관리 PWA) - 메인 로직 (Vanilla JS)
+ * 데이터는 localStorage('fridge-pwa-v1')에 자동 저장됩니다. (앱 이름이 바뀌어도 저장 이름은 그대로 → 기존 데이터 호환)
  */
 'use strict';
 
@@ -7,7 +7,8 @@
  * 1. 상수 · 기본값
  * ========================================================= */
 const STORE_KEY = 'fridge-pwa-v1'; // 저장 데이터 이름 (바꾸면 기존 데이터를 못 읽으니 그대로 두기)
-const APP_VERSION = 'v5'; // 배포할 때 sw.js의 CACHE 숫자와 같이 올리기
+const APP_VERSION = 'v6'; // 배포할 때 sw.js의 CACHE 숫자와 같이 올리기
+const LOG_MAX = 1000; // 소진 기록 최대 보관 개수
 
 const CATEGORIES = [
   { id: 'meat', name: '육류·생선', emoji: '🥩' },
@@ -110,6 +111,7 @@ function defaultState() {
     openRules: { ...DEFAULT_OPEN_RULES },
     ui: { tab: 'fridge', zoneId: 'z_fridge', mode: 'slot', open: {}, recipeTag: 'all', recipeOwned: true, addMode: 'single', combo: [], lastZoneId: '', lastSlotId: '' },
     lastBackup: null,
+    log: [], // 소진 기록: { id, name, cat, kind: 'eaten' | 'wasted', date }
     migrations: { kimchi: true } // 이미 적용된 데이터 업데이트 기록
   };
 }
@@ -119,6 +121,7 @@ function normalize(d) {
   const s = { ...base, ...d };
   s.ui = { ...base.ui, ...(d.ui || {}) };
   if (!Array.isArray(s.ui.combo)) s.ui.combo = [];
+  s.ui.rulesOpen = false; // 소비기한 기준표는 앱을 열 때마다 접힌 상태로
   s.rules = {};
   for (const t in base.rules) s.rules[t] = { ...base.rules[t], ...((d.rules || {})[t] || {}) };
   s.openRules = { ...base.openRules, ...(d.openRules || {}) };
@@ -145,7 +148,7 @@ function normalize(d) {
   s.items = (Array.isArray(s.items) ? s.items : []).filter((i) => i && i.name).map((i) => {
     const it = { id: i.id || uid(), name: String(i.name), cat: CAT[i.cat] ? i.cat : 'etc', zoneId: i.zoneId, slotId: i.slotId,
       size: i.size || '', count: Number(i.count) || 0, unit: i.unit || '팩', expiry: isYmd(i.expiry) ? i.expiry : '',
-      opened: isYmd(i.opened) ? i.opened : '', memo: i.memo || '', created: i.created || todayStr() };
+      opened: isYmd(i.opened) ? i.opened : '', made: isYmd(i.made) ? i.made : '', memo: i.memo || '', created: i.created || todayStr() };
     const z = s.zones.find((zz) => zz.id === it.zoneId) || s.zones[0];
     it.zoneId = z.id;
     if (!z.slots.find((x) => x.id === it.slotId)) it.slotId = z.slots[0].id;
@@ -153,6 +156,7 @@ function normalize(d) {
   });
   s.shopping = (Array.isArray(s.shopping) ? s.shopping : []).filter((x) => x && x.name).map((x) => ({ id: x.id || uid(), name: String(x.name), done: !!x.done }));
   s.freq = Array.isArray(d.freq) ? d.freq.filter((f) => f && f.name).map((f) => ({ ...f, id: f.id || uid() })) : base.freq;
+  s.log = (Array.isArray(d.log) ? d.log : []).filter((x) => x && x.name && (x.kind === 'eaten' || x.kind === 'wasted') && isYmd(x.date)).slice(-LOG_MAX);
   if (!s.zones.find((z) => z.id === s.ui.zoneId && !z.hidden)) s.ui.zoneId = s.zones.find((z) => !z.hidden).id;
   return s;
 }
@@ -250,9 +254,30 @@ function guessCategory(name) {
 }
 
 function newItem(data) {
-  const it = { id: uid(), name: '', cat: 'etc', zoneId: S.zones[0].id, slotId: S.zones[0].slots[0].id, size: '', count: 1, unit: '팩', expiry: '', opened: '', memo: '', created: todayStr(), ...data };
+  const it = { id: uid(), name: '', cat: 'etc', zoneId: S.zones[0].id, slotId: S.zones[0].slots[0].id, size: '', count: 1, unit: '팩', expiry: '', opened: '', made: '', memo: '', created: todayStr(), ...data };
   S.items.push(it);
   return it;
+}
+
+// 소진 기록: 다 먹음(eaten) / 버림(wasted)
+function logUse(it, kind) {
+  S.log.push({ id: uid(), name: it.name, cat: it.cat, kind, date: todayStr() });
+  if (S.log.length > LOG_MAX) S.log = S.log.slice(-LOG_MAX);
+}
+// 이번 달 알뜰 소비율 = 다 먹음 ÷ (다 먹음 + 버림)
+function monthStats() {
+  const ym = todayStr().slice(0, 7);
+  const m = S.log.filter((x) => x.date.startsWith(ym));
+  const eaten = m.filter((x) => x.kind === 'eaten').length;
+  const wasted = m.filter((x) => x.kind === 'wasted').length;
+  const total = eaten + wasted;
+  return { eaten, wasted, total, rate: total ? Math.round((eaten / total) * 100) : null, month: +ym.slice(5) };
+}
+function statCard(compact) {
+  const st = monthStats();
+  if (!st.total) return compact ? '' : `<div class="card stat"><div class="ring" style="--p:0"><b>-</b></div><div class="txt"><strong>${st.month}월 알뜰 소비율</strong><span>재료를 다 쓰거나 버릴 때 기록하면 계산돼요.</span></div></div>`;
+  const msg = st.rate >= 90 ? '버리는 재료 거의 없이 잘 털고 있어요' : st.rate >= 70 ? '알뜰하게 잘 쓰고 있어요' : '임박 재료부터 먼저 써 볼까요?';
+  return `<div class="card stat"><div class="ring" style="--p:${st.rate}"><b>${st.rate}%</b></div><div class="txt"><strong>${st.month}월 알뜰 소비율</strong><span>다 먹음 ${st.eaten} · 버림 ${st.wasted} — ${msg}</span></div></div>`;
 }
 
 function addToShopping(name) {
@@ -429,18 +454,18 @@ function toast(msg, actionLabel, actionFn) {
 const TITLES = { fridge: '우리집 냉장고', add: '재료 등록', recipe: '오늘 뭐 먹지?', shop: '장보기', settings: '설정' };
 let pendingPrefill = null; // 다른 화면에서 등록 화면으로 넘길 값
 let bulkDraft = ''; let bulkRows = [];
+let searchQ = ''; // 냉장고 탭 검색어 (저장하지 않음)
 
 function render() {
   const tab = S.ui.tab;
   document.querySelectorAll('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
-  $('#pageTitle').textContent = TITLES[tab];
   const shopN = S.shopping.filter((x) => !x.done).length;
   const badge = $('#shopBadge'); badge.hidden = !shopN; badge.textContent = shopN;
   const live = S.items.filter((i) => i.count > 0);
   const red = live.filter((i) => dueInfo(i).level === 'red').length;
-  $('#appbarInfo').innerHTML = tab === 'fridge' ? `재료 ${live.length}개${red ? ` · <b style="color:var(--red)">임박 ${red}</b>` : ''}` : '';
+  $('#appbarInfo').innerHTML = tab === 'fridge' ? `재료 ${live.length}개${red ? ` · <b>임박 ${red}</b>` : ''}` : esc(TITLES[tab]);
   const v = $('#view');
-  if (tab === 'fridge') v.innerHTML = viewFridge();
+  if (tab === 'fridge') { v.innerHTML = viewFridge(); mountFridge(v); }
   else if (tab === 'add') { v.innerHTML = viewAdd(); mountAdd(v); }
   else if (tab === 'recipe') v.innerHTML = viewRecipe();
   else if (tab === 'shop') { v.innerHTML = viewShop(); mountShop(v); }
@@ -448,29 +473,37 @@ function render() {
 }
 
 /* ---------- 8-1. 냉장고 탭 ---------- */
+const dchip = (d, text) => `<span class="dchip lv-${d.level}">${text ?? ddayText(d.left)}</span>`;
+function daysSince(s) { return Math.max(0, daysBetween(s, todayStr())); }
+function extraBadges(it) {
+  let b = '';
+  if (it.made) b += `<span class="badge made">만든 지 +${daysSince(it.made)}일</span>`;
+  if (it.opened) {
+    const n = daysSince(it.opened); const lim = openDays(it.cat);
+    b += `<span class="badge ${n >= lim ? 'red' : n >= lim - 7 ? 'yellow' : ''}">개봉 +${n}일</span>`;
+  }
+  return b;
+}
+function qtyText(it) { return `<b>${fmtNum(it.count)}</b>${esc(it.unit || '팩')}`; }
+
 function itemRow(it, showLoc) {
   const d = dueInfo(it);
   const unit = it.unit || '팩';
-  let openBadge = '';
-  if (it.opened) {
-    const n = daysBetween(it.opened, todayStr()); const lim = openDays(it.cat);
-    openBadge = `<span class="badge ${n >= lim ? 'red' : n >= lim - 7 ? 'yellow' : ''}">개봉 +${Math.max(0, n)}일</span>`;
-  }
   const lv = it.count > 0 ? d.level : 'empty';
   const btn = it.count > 0
     ? `<button class="use-btn" data-act="use" data-id="${it.id}" aria-label="${esc(it.name)} 1${esc(unit)} 사용">-1${esc(unit)}</button>`
-    : `<button class="use-btn shop" data-act="toShop" data-id="${it.id}">🛒담기</button>`;
+    : `<button class="use-btn shop" data-act="toShop" data-id="${it.id}">정리</button>`;
   return `<div class="item lv-${lv}">
-    <span class="sig"></span>
     <button class="item-main" data-act="itemMenu" data-id="${it.id}">
-      <span class="item-name">${CAT[it.cat] ? CAT[it.cat].emoji : ''} ${esc(it.name)}${it.size ? ` <small>${esc(it.size)}</small>` : ''}</span>
-      <span class="item-meta"><span class="dday">${it.count > 0 ? ddayText(d.left) : '다 씀'}</span>${it.expiry ? `<span>~${shortDate(it.expiry)}</span>` : ''}${openBadge}${showLoc ? `<span>${esc(locText(it))}</span>` : ''}${it.memo ? `<span>📝${esc(it.memo)}</span>` : ''}</span>
+      <span class="item-name">${esc(it.name)}${it.size ? ` <small>${esc(it.size)}</small>` : ''}</span>
+      <span class="item-meta">${it.count > 0 ? dchip(d) : '<span class="dchip">다 씀</span>'}${it.expiry ? `<span>~${shortDate(it.expiry)}</span>` : ''}${extraBadges(it)}${showLoc ? `<span>${esc(locText(it))}</span>` : ''}${it.memo ? `<span>· ${esc(it.memo)}</span>` : ''}</span>
     </button>
-    <div class="qty"><b>${fmtNum(it.count)}</b><small>${esc(unit)}</small></div>
+    <div class="qty">${qtyText(it)}</div>
     ${btn}
   </div>`;
 }
 
+const CHEV = '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
 function slotCard(z, sl) {
   const its = sortByDue(S.items.filter((i) => i.zoneId === z.id && i.slotId === sl.id));
   const live = its.filter((i) => i.count > 0);
@@ -479,27 +512,45 @@ function slotCard(z, sl) {
   const open = S.ui.open[sl.id] ?? its.length > 0;
   return `<section class="slot ${open ? 'open' : ''}">
     <button class="slot-head" data-act="toggleSlot" data-slot="${sl.id}" data-def="${its.length > 0 ? 1 : 0}" aria-expanded="${open}">
-      <span class="slot-name">${sl.door ? '🚪 ' : ''}${esc(sl.name)}</span>
+      <span class="slot-name">${esc(sl.name)}${sl.door ? '<span class="tag">개봉 기록</span>' : ''}</span>
       <span class="pills"><span class="pill">${live.length}개</span>${red ? `<span class="pill red">임박 ${red}</span>` : ''}${yel ? `<span class="pill yellow">주의 ${yel}</span>` : ''}</span>
-      <span class="chev">▾</span>
+      ${CHEV}
     </button>
     ${open ? `<div class="slot-body">${its.length ? its.map((i) => itemRow(i)).join('') : '<p class="empty-s">비어 있어요</p>'}
       <button class="btn text sm add-here" data-act="addHere" data-zone="${z.id}" data-slot="${sl.id}">+ 이 칸에 재료 등록</button></div>` : ''}
   </section>`;
 }
 
-function viewFridge() {
+// 검색: 이름·메모에 검색어가 들어간 재료를 "어느 구역 몇 번째 칸에 몇 개" 형태로 보여 줌
+function searchResults(q) {
+  const k = normName(q).toLowerCase();
+  const hits = sortByDue(S.items.filter((it) => normName(it.name + ' ' + (it.memo || '')).toLowerCase().includes(k)));
+  if (!hits.length) return `<div class="card empty" style="padding:22px">'${esc(q)}' 재료가 냉장고에 없어요.<br><br><button class="btn ghost sm" data-act="shopAddName" data-name="${esc(q.trim())}">장보기에 추가</button></div>`;
+  return `<h2 class="sec">검색 결과 <small>${hits.length}개</small></h2><div class="card">${hits.map((it) => {
+    const z = zoneById(it.zoneId); const idx = z ? z.slots.findIndex((s) => s.id === it.slotId) : -1; const sl = slotOf(z, it.slotId);
+    const d = dueInfo(it);
+    return `<div class="item lv-${it.count > 0 ? d.level : 'empty'}"><button class="item-main" data-act="itemMenu" data-id="${it.id}">
+      <span class="item-name">${esc(it.name)}${it.size ? ` <small>${esc(it.size)}</small>` : ''}</span>
+      <span class="item-meta"><span class="found-loc">${esc(z ? z.name : '?')} ${idx + 1}번째 칸(${esc(sl ? sl.name : '?')})</span>${it.count > 0 ? dchip(d) : '<span class="dchip">다 씀</span>'}${it.memo ? `<span>· ${esc(it.memo)}</span>` : ''}</span>
+    </button><div class="qty">${qtyText(it)}</div></div>`;
+  }).join('')}</div>`;
+}
+
+function fridgeBody() {
+  if (searchQ.trim()) return searchResults(searchQ.trim());
   const live = S.items.filter((i) => i.count > 0);
   const top = sortByDue(live).filter((i) => dueInfo(i).left !== null).slice(0, 3);
   let h = '';
   if (top.length) {
-    h += `<h2 class="sec">⏰ 먼저 써야 할 재료 <small>임박순 최대 3개</small></h2><div class="urgent-list">${top.map((it) => {
+    h += `<h2 class="sec">먼저 써야 할 재료 <small>임박순</small></h2><div class="urgent-list">${top.map((it) => {
       const d = dueInfo(it);
-      return `<button class="urgent-card lv-${d.level}" data-act="itemMenu" data-id="${it.id}"><b>${esc(it.name)}</b><span class="dday">${ddayText(d.left)}</span><small>${esc(locText(it))}</small><small>남은 ${fmtNum(it.count)}${esc(it.unit)}</small></button>`;
+      return `<button class="urgent-card" data-act="itemMenu" data-id="${it.id}"><b>${esc(it.name)}</b>${dchip(d)}<small>${esc(locText(it))}</small><small>남은 ${fmtNum(it.count)}${esc(it.unit)}</small></button>`;
     }).join('')}</div>`;
   } else if (!S.items.length) {
-    h += `<div class="empty card"><span class="big">🧊</span>아직 등록된 재료가 없어요.<br>아래 <b>➕ 등록</b> 탭에서 자주 사는 재료를 한 번에 넣어 보세요.<br><br><button class="btn primary" data-act="tab" data-tab="add">재료 등록하러 가기</button></div>`;
+    h += `<div class="empty card"><span class="big">🧺</span>아직 등록된 재료가 없어요.<br>아래 <b>등록</b> 탭에서 자주 사는 재료를 한 번에 넣어 보세요.<br><br><button class="btn primary" data-act="tab" data-tab="add">재료 등록하러 가기</button></div>`;
   }
+  const st = statCard(true);
+  if (st) h += `<div style="margin-top:12px">${st}</div>`;
   h += `<div class="seg" role="tablist">
     <button data-act="mode" data-mode="slot" class="${S.ui.mode === 'slot' ? 'on' : ''}">칸별 보기</button>
     <button data-act="mode" data-mode="due" class="${S.ui.mode === 'due' ? 'on' : ''}">전체 임박순</button></div>`;
@@ -507,18 +558,30 @@ function viewFridge() {
   if (S.ui.mode === 'due') {
     const all = sortByDue(S.items);
     h += all.length ? `<div class="card">${all.map((i) => itemRow(i, true)).join('')}</div>` : '<p class="empty">재료가 없어요.</p>';
-    h += '<p class="hint">🔴 D-3 이하 · 🟡 D-7 이하 · 🟢 여유 — 개봉한 재료는 개봉일 기준도 함께 계산해요.</p>';
+    h += '<p class="hint">긴급 D-3 이하 · 주의 D-7 이하 · 여유 — 개봉한 재료는 개봉일 기준도 함께 계산해요.</p>';
     return h;
   }
-  h += `<div class="chips" style="margin-bottom:10px">${visibleZones().map((z) => {
+  h += `<div class="chips" style="margin-bottom:12px">${visibleZones().map((z) => {
     const its = S.items.filter((i) => i.zoneId === z.id && i.count > 0);
     const red = its.filter((i) => dueInfo(i).level === 'red').length;
-    return `<button class="chip ${z.id === S.ui.zoneId ? 'on' : ''} ${red ? 'lv-red' : ''}" data-act="zone" data-zone="${z.id}">${ZONE_TYPES[z.type].emoji} ${esc(z.name)} <span class="n">${its.length}</span></button>`;
+    return `<button class="chip ${z.id === S.ui.zoneId ? 'on' : ''}" data-act="zone" data-zone="${z.id}">${esc(z.name)} <span class="n">${its.length}</span>${red ? '<span class="dot" aria-label="임박 재료 있음"></span>' : ''}</button>`;
   }).join('')}</div>`;
   const z = currentZone();
   h += z.slots.map((sl) => slotCard(z, sl)).join('');
-  h += `<div class="zone-actions"><button class="btn ghost" data-act="addSlot" data-zone="${z.id}">+ 칸 추가</button><button class="btn ghost" data-act="manageSlots" data-zone="${z.id}">✏️ 칸 이름·순서</button></div>`;
+  h += `<div class="zone-actions"><button class="btn ghost" data-act="addSlot" data-zone="${z.id}">+ 칸 추가</button><button class="btn ghost" data-act="manageSlots" data-zone="${z.id}">칸 이름·순서</button></div>`;
   return h;
+}
+
+function viewFridge() {
+  return `<div class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+    <input type="search" id="searchInput" placeholder="재료·메모 검색 (예: 두부, 이유식)" value="${esc(searchQ)}" enterkeyhint="search" autocomplete="off">
+    <button class="clear" id="searchClear" aria-label="검색어 지우기" ${searchQ ? '' : 'hidden'}>✕</button></div>
+    <div id="fridgeBody">${fridgeBody()}</div>`;
+}
+function mountFridge(v) {
+  const inp = $('#searchInput', v); const clr = $('#searchClear', v);
+  inp.addEventListener('input', () => { searchQ = inp.value; clr.hidden = !searchQ; $('#fridgeBody', v).innerHTML = fridgeBody(); });
+  clr.addEventListener('click', () => { searchQ = ''; inp.value = ''; clr.hidden = true; $('#fridgeBody', v).innerHTML = fridgeBody(); inp.focus(); });
 }
 
 /* ---------- 8-2. 품목 메뉴 / 수정 / 이동 / 개봉 ---------- */
@@ -526,50 +589,149 @@ function itemMenu(id) {
   const it = itemById(id); if (!it) return;
   const d = dueInfo(it);
   const unit = it.unit || '팩';
-  openSheet(it.name, `<div class="sheet-info">${esc(locText(it))} · <b>${it.count > 0 ? ddayText(d.left) : '다 씀'}</b>${d.reason ? ` (${d.reason})` : ''}<br>남은 수량 ${fmtNum(it.count)}${esc(unit)}${it.size ? ` · 1${esc(unit)} ${esc(it.size)}` : ''}${it.opened ? ` · 개봉 ${shortDate(it.opened)}` : ''}</div>
-    <div class="menu-grid">
-      <button data-m="edit"><span class="e">✏️</span>수정</button>
-      <button data-m="move"><span class="e">🔀</span>칸 이동</button>
-      <button data-m="open"><span class="e">🫙</span>${it.opened ? '개봉일 변경' : '오늘 개봉'}</button>
-      <button data-m="plus"><span class="e">➕</span>+1${esc(unit)}</button>
-      <button data-m="shop"><span class="e">🛒</span>장보기 추가</button>
-      <button data-m="del" class="danger"><span class="e">🗑️</span>삭제</button>
+  const has = it.count > 0;
+  openSheet(it.name, `<div class="sheet-info">${has ? dchip(d) : '<span class="dchip">다 씀</span>'}${d.reason ? `<span>${d.reason}</span>` : ''}<span class="sep">|</span><span>${esc(locText(it))}</span><span class="sep">|</span><span>남은 <b style="color:var(--text)">${fmtNum(it.count)}${esc(unit)}</b>${it.size ? ` (${esc(it.size)})` : ''}</span>${extraBadges(it)}</div>
+    <div class="act-primary">
+      <button data-m="use" class="main" ${has ? '' : 'disabled'}>사용<small>-1${esc(unit)}</small></button>
+      <button data-m="split" ${has ? '' : 'disabled'}>소분<small>나눠 담기</small></button>
+      <button data-m="open">${it.opened ? '개봉일' : '개봉'}<small>${it.opened ? shortDate(it.opened) + ' 변경' : '오늘로 기록'}</small></button>
+    </div>
+    <div class="act-quick">
+      <button data-m="half" ${has ? '' : 'disabled'}>½ 절반 사용</button>
+      <button data-m="plus">+1${esc(unit)}</button>
+      <button data-m="move">칸 이동</button>
+    </div>
+    <div class="act-sub">
+      <button data-m="edit">수정</button>
+      <button data-m="shop">장보기 추가</button>
+      <button data-m="del" class="danger">삭제</button>
     </div>`, (root) => {
     root.addEventListener('click', (e) => {
-      const b = e.target.closest('[data-m]'); if (!b) return;
+      const b = e.target.closest('[data-m]'); if (!b || b.disabled) return;
       const m = b.dataset.m;
-      if (m === 'edit') editSheet(it);
+      if (m === 'use') { closeSheet(); useAmount(it.id, 1); }
+      else if (m === 'half') { closeSheet(); useAmount(it.id, Math.min(0.5, it.count)); }
+      else if (m === 'split') splitSheet(it);
+      else if (m === 'edit') editSheet(it);
       else if (m === 'move') moveSheet(it);
       else if (m === 'open') {
         if (!it.opened) { it.opened = todayStr(); closeSheet(); commit(); toast(`${it.name} 오늘 개봉으로 기록했어요`); }
         else openedSheet(it);
-      } else if (m === 'plus') { it.count += 1; closeSheet(); commit(); toast(`${it.name} ${fmtNum(it.count)}${unit}`); }
+      } else if (m === 'plus') { it.count = Math.round((it.count + 1) * 10) / 10; closeSheet(); commit(); toast(`${it.name} ${fmtNum(it.count)}${unit}`); }
       else if (m === 'shop') { const ok = addToShopping(it.name); closeSheet(); commit(); toast(ok ? '장보기 목록에 담았어요' : '이미 장보기 목록에 있어요'); }
-      else if (m === 'del') { closeSheet(); deleteItem(it); }
+      else if (m === 'del') finishSheet(it, true);
     });
   });
 }
 
-function deleteItem(it) {
-  const idx = S.items.indexOf(it); if (idx < 0) return;
-  S.items.splice(idx, 1); commit();
-  toast(`${it.name} 삭제됨`, '되돌리기', () => { S.items.splice(Math.min(idx, S.items.length), 0, it); commit(); });
+// 재료 정리: '다 먹음' / '버림' 기록 + 장보기 원클릭. fromDelete면 '기록 없이 삭제'도 제공
+function finishSheet(it, fromDelete) {
+  const inShop = () => S.shopping.some((x) => !x.done && x.name === it.name);
+  openSheet(fromDelete ? `${it.name} 정리하기` : `${it.name} 다 썼어요`, `<p class="sheet-info">${fromDelete && it.count > 0 ? `남은 ${fmtNum(it.count)}${esc(it.unit)}을(를) 정리해요. ` : ''}어떻게 정리됐나요? 이번 달 알뜰 소비율에 반영돼요.</p>
+    <div class="ask-two">
+      <button class="btn primary" data-m="eaten">다 먹음<small>알뜰 소비</small></button>
+      <button class="btn coral" data-m="wasted">버림<small>상했거나 남김</small></button>
+    </div>
+    <button class="btn ghost block" style="margin-top:10px" data-m="shop" ${inShop() ? 'disabled' : ''}>${inShop() ? '✓ 장보기 목록에 있어요' : '+ 장보기에 바로 추가'}</button>
+    <div class="act-sub" style="grid-template-columns:1fr 1fr">
+      ${fromDelete ? '<button data-m="silent">기록 없이 삭제</button>' : '<button data-m="keep">0개로 남겨두기</button>'}
+      <button data-m="close">취소</button>
+    </div>`, (root) => {
+    root.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-m]'); if (!b || b.disabled) return;
+      const m = b.dataset.m;
+      if (m === 'shop') { addToShopping(it.name); save(); render(); b.disabled = true; b.textContent = '✓ 장보기 목록에 담았어요'; return; }
+      if (m === 'keep') { closeSheet(); return; }
+      if (m === 'eaten' || m === 'wasted' || m === 'silent') {
+        const idx = S.items.indexOf(it);
+        if (m !== 'silent') logUse(it, m);
+        const logged = m !== 'silent' ? S.log[S.log.length - 1] : null;
+        S.items = S.items.filter((x) => x !== it);
+        closeSheet(); commit();
+        toast(m === 'eaten' ? `${it.name} 다 먹음 기록` : m === 'wasted' ? `${it.name} 버림 기록` : `${it.name} 삭제됨`, '되돌리기', () => {
+          if (idx >= 0) S.items.splice(Math.min(idx, S.items.length), 0, it); else S.items.push(it);
+          if (logged) S.log = S.log.filter((x) => x !== logged);
+          commit();
+        });
+      }
+    });
+  });
 }
 
-function useOne(id) {
+// 사용(1개 또는 절반). 0이 되면 '다 먹음/버림' 정리 시트
+function useAmount(id, amt) {
   const it = itemById(id); if (!it || it.count <= 0) return;
-  it.count = Math.max(0, Math.round((it.count - 1) * 10) / 10);
+  const before = it.count;
+  it.count = Math.max(0, Math.round((it.count - amt) * 10) / 10);
   commit();
-  if (it.count === 0) {
-    ask(`${it.name} 다 썼어요 🎉`, '0이 되었어요. 어떻게 할까요?', [
-      { label: '🛒 장보기에 담고 냉장고에서 빼기', cls: 'primary', fn: () => { addToShopping(it.name); S.items = S.items.filter((x) => x !== it); commit(); toast('장보기 목록에 담았어요'); } },
-      { label: '냉장고에서 빼기만', fn: () => { S.items = S.items.filter((x) => x !== it); commit(); } },
-      { label: '0개로 남겨두기', cls: 'ghost' }
-    ]);
-  } else {
-    toast(`${it.name} 남은 ${fmtNum(it.count)}${it.unit}`, '취소', () => { it.count += 1; commit(); });
-  }
+  if (it.count === 0) finishSheet(it, false);
+  else toast(`${it.name} 남은 ${fmtNum(it.count)}${it.unit}`, '취소', () => { it.count = before; commit(); });
 }
+function useOne(id) { useAmount(id, 1); }
+
+// 소분: 1단위를 N개로 나눠 그중 일부를 다른 구역(기본 냉동실)으로 옮김
+function splitSheet(it) {
+  const from = zoneById(it.zoneId);
+  let parts = 3; let move = 2;
+  let destZ = from.type === 'freezer' ? firstZoneOfType('fridge') : firstZoneOfType('freezer');
+  let destS = destZ.slots[0].id;
+  let unit = '팩';
+  const draw = (root) => {
+    const dz = zoneById(destZ.id);
+    const typeChanged = dz.type !== from.type;
+    const days = ruleDays(dz.type, it.cat);
+    const stay = parts - move;
+    root.innerHTML = `<div class="form">
+      <p class="sheet-info" style="margin:0">${esc(it.name)} 1${esc(it.unit)}${it.size ? `(${esc(it.size)})` : ''}을(를) 나눠 담아요. 남은 수량 ${fmtNum(it.count)}${esc(it.unit)}</p>
+      <div class="row2">
+        <div class="fld"><span>몇 개로 나눌까요</span><div class="stepper"><button type="button" data-st="p-">−</button><output>${parts}</output><button type="button" data-st="p+">+</button></div></div>
+        <div class="fld"><span>그중 옮길 개수</span><div class="stepper"><button type="button" data-st="m-">−</button><output>${move}</output><button type="button" data-st="m+">+</button></div></div>
+      </div>
+      <label class="fld"><span>나눈 단위</span><select id="spUnit">${unitOptions(unit)}</select></label>
+      <div class="fld"><span>옮길 곳</span><div class="chips">${visibleZones().map((z) => `<button type="button" class="chip ${z.id === dz.id ? 'on' : ''}" data-z="${z.id}">${esc(z.name)}</button>`).join('')}</div>
+        <div class="slot-grid" style="margin-top:6px">${dz.slots.map((s) => `<button type="button" data-s="${s.id}" class="${s.id === destS ? 'on' : ''}">${esc(s.name)}</button>`).join('')}</div></div>
+      <label class="check"><input type="checkbox" id="spRecalc" ${typeChanged ? 'checked' : ''}> 옮긴 재료 소비기한 새로 계산 → ${shortDate(addDays(todayStr(), days))} (+${days}일)</label>
+      <div class="split-preview">결과: <b>${esc(locText(it))}</b>에 ${stay > 0 ? `${stay}${esc(unit)}` : '남김 없음'}${it.count > 1 ? ` (+ 나머지 ${fmtNum(it.count - 1)}${esc(it.unit)})` : ''} · <b>${esc(dz.name)} · ${esc(slotOf(dz, destS).name)}</b>에 ${move}${esc(unit)}</div>
+      <button type="button" class="btn primary block" data-st="ok">소분하기</button></div>`;
+    $('#spUnit', root).addEventListener('change', (e) => { unit = e.target.value; draw(root); });
+  };
+  openSheet('소분해서 나누기', '', (root) => {
+    draw(root);
+    root.addEventListener('click', (e) => {
+      const z = e.target.closest('[data-z]'); if (z) { destZ = zoneById(z.dataset.z); destS = destZ.slots[0].id; draw(root); return; }
+      const s = e.target.closest('[data-s]'); if (s) { destS = s.dataset.s; draw(root); return; }
+      const b = e.target.closest('[data-st]'); if (!b) return;
+      const k = b.dataset.st;
+      if (k === 'p-') parts = Math.max(2, parts - 1);
+      else if (k === 'p+') parts = Math.min(20, parts + 1);
+      else if (k === 'm-') move = Math.max(1, move - 1);
+      else if (k === 'm+') move = Math.min(parts, move + 1);
+      else if (k === 'ok') { applySplit(it, parts, move, unit, destZ.id, destS, $('#spRecalc', root).checked); return; }
+      move = Math.min(move, parts);
+      draw(root);
+    });
+  });
+}
+function applySplit(it, parts, move, unit, destZoneId, destSlotId, recalc) {
+  const stay = parts - move;
+  const dz = zoneById(destZoneId);
+  const memo = (`소분 ${shortDate(todayStr())} ` + (it.memo || '')).trim();
+  const moved = newItem({ name: it.name, cat: it.cat, zoneId: destZoneId, slotId: destSlotId, size: '', count: move, unit,
+    expiry: recalc ? addDays(todayStr(), ruleDays(dz.type, it.cat)) : it.expiry, opened: '', made: it.made, memo });
+  if (it.count <= 1) {
+    if (stay > 0) { it.count = stay; it.unit = unit; it.size = ''; it.memo = memo; }
+    else S.items = S.items.filter((x) => x !== it);
+  } else {
+    it.count = Math.round((it.count - 1) * 10) / 10;
+    if (stay > 0) newItem({ name: it.name, cat: it.cat, zoneId: it.zoneId, slotId: it.slotId, size: '', count: stay, unit, expiry: it.expiry, opened: it.opened, made: it.made, memo });
+  }
+  S.ui.open[destSlotId] = true;
+  closeSheet(); commit();
+  toast(`${it.name} ${parts}개로 소분 · ${move}${unit} → ${locText(moved)}`);
+}
+
+// 예전 코드 호환용: 삭제는 정리 시트로
+function deleteItem(it) { finishSheet(it, true); }
 
 function editSheet(it) {
   openSheet('재료 수정', itemFormHTML(it, true), (root) => {
@@ -601,9 +763,9 @@ function moveSheet(it) {
     let days = ruleDays(z.type, it.cat);
     if (thaw) days = Math.min(days, THAW_MAX[it.cat] ?? THAW_MAX.etc);
     root.innerHTML = `<div class="form">
-      <div class="fld"><span>옮길 구역</span><div class="chips">${visibleZones(it.zoneId).map((zz) => `<button class="chip ${zz.id === zid ? 'on' : ''}" data-z="${zz.id}">${ZONE_TYPES[zz.type].emoji} ${esc(zz.name)}</button>`).join('')}</div></div>
+      <div class="fld"><span>옮길 구역</span><div class="chips">${visibleZones(it.zoneId).map((zz) => `<button class="chip ${zz.id === zid ? 'on' : ''}" data-z="${zz.id}">${esc(zz.name)}</button>`).join('')}</div></div>
       <label class="check"><input type="checkbox" id="recalc" ${typeChanged ? 'checked' : ''}> 소비기한 새로 계산 → ${shortDate(addDays(todayStr(), days))} (+${days}일${thaw ? ', 해동 기준' : ''})</label>
-      <div class="fld"><span>칸 선택 — 누르면 바로 이동해요</span><div class="slot-grid">${z.slots.map((s) => `<button data-s="${s.id}" class="${z.id === it.zoneId && s.id === it.slotId ? 'cur' : ''}">${s.door ? '🚪 ' : ''}${esc(s.name)}</button>`).join('')}</div></div></div>`;
+      <div class="fld"><span>칸 선택 — 누르면 바로 이동해요</span><div class="slot-grid">${z.slots.map((s) => `<button data-s="${s.id}" class="${z.id === it.zoneId && s.id === it.slotId ? 'cur' : ''}">${esc(s.name)}</button>`).join('')}</div></div></div>`;
     root.querySelectorAll('[data-z]').forEach((b) => b.addEventListener('click', () => { zid = b.dataset.z; draw(root); }));
     root.querySelectorAll('[data-s]').forEach((b) => b.addEventListener('click', () => {
       const recalc = $('#recalc', root).checked;
@@ -629,16 +791,19 @@ function itemFormHTML(it, isEdit) {
   const z = zoneById(it.zoneId) || S.zones[0];
   return `<form class="form" autocomplete="off" novalidate>
     <label class="fld"><span>재료 이름</span><input name="name" value="${esc(it.name)}" placeholder="예: 삼겹살" enterkeyhint="next"></label>
-    <div class="fld"><span>카테고리</span><div class="chips cats">${CATEGORIES.map((c) => `<button type="button" class="chip ${c.id === it.cat ? 'on' : ''}" data-cat="${c.id}">${c.emoji} ${c.name}</button>`).join('')}</div></div>
+    <div class="fld"><span>카테고리</span><div class="chips cats">${CATEGORIES.map((c) => `<button type="button" class="chip ${c.id === it.cat ? 'on' : ''}" data-cat="${c.id}">${c.name}</button>`).join('')}</div></div>
     <div class="row2">
-      <label class="fld"><span>보관 구역</span><select name="zoneId">${visibleZones(z.id).map((zz) => `<option value="${zz.id}" ${zz.id === z.id ? 'selected' : ''}>${ZONE_TYPES[zz.type].emoji} ${esc(zz.name)}</option>`).join('')}</select></label>
+      <label class="fld"><span>보관 구역</span><select name="zoneId">${visibleZones(z.id).map((zz) => `<option value="${zz.id}" ${zz.id === z.id ? 'selected' : ''}>${esc(zz.name)}</option>`).join('')}</select></label>
       <label class="fld"><span>칸</span><select name="slotId"></select></label>
     </div>
-    <div class="row3">
-      <label class="fld"><span>1팩 용량</span><input name="size" value="${esc(it.size)}" placeholder="120g"></label>
-      <label class="fld"><span>수량</span><input name="count" type="number" inputmode="decimal" min="0" step="1" value="${esc(it.count)}"></label>
+    <div class="row2">
+      <label class="fld"><span>수량</span><input name="count" type="number" inputmode="decimal" min="0" step="0.5" value="${esc(it.count)}"></label>
       <label class="fld"><span>단위</span><select name="unit">${unitOptions(it.unit || defaultUnit(it.cat))}</select></label>
     </div>
+    <label class="fld size-wrap" ${it.size ? '' : 'hidden'}><span>1팩 용량</span><input name="size" value="${esc(it.size)}" placeholder="예: 120g"></label>
+    <div class="toggle-row"><span class="t">만든 날 기준으로 관리<small>밑반찬·이유식: '만든 지 +N일' 표시, 소비기한도 만든 날부터 계산</small></span>
+      <label class="switch"><input type="checkbox" name="madeOn" ${it.made ? 'checked' : ''} aria-label="만든 날 기준"><i></i></label></div>
+    <label class="fld made-wrap" ${it.made ? '' : 'hidden'}><span>만든 날</span><input type="date" name="made" value="${esc(it.made || todayStr())}" max="${todayStr()}"></label>
     <div class="fld"><span>소비기한 <em class="exp-hint"></em></span>
       <div class="inline"><input type="date" name="expiry" value="${esc(it.expiry)}"><button type="button" class="btn ghost sm" data-f="auto">↺ 자동</button></div>
       <div class="quick-days">${[1, 3, 7, 14, 30].map((n) => `<button type="button" data-days="${n}">+${n}일</button>`).join('')}<button type="button" data-days="">기한 없음</button></div>
@@ -646,7 +811,8 @@ function itemFormHTML(it, isEdit) {
     <div class="fld open-wrap"><span>개봉일 <em class="open-hint"></em></span>
       <div class="inline"><input type="date" name="opened" value="${esc(it.opened)}" max="${todayStr()}"><button type="button" class="btn ghost sm" data-f="openToday">오늘 개봉</button><button type="button" class="btn ghost sm" data-f="openClear">미개봉</button></div>
     </div>
-    <label class="fld"><span>메모</span><input name="memo" value="${esc(it.memo)}" placeholder="예: 아기용, 양념됨"></label>
+    <label class="fld"><span>메모</span><input name="memo" value="${esc(it.memo)}" placeholder="예: 120g씩, 아기용, 양념됨"></label>
+    ${it.size ? '' : '<button type="button" class="linkish" data-f="showSize">+ 1팩 용량 따로 입력</button>'}
     <button type="submit" class="btn primary block">${isEdit ? '수정 저장' : '냉장고에 넣기'}</button>
     ${isEdit ? '' : '<button type="button" class="btn text sm" data-f="saveFreq">☆ 지금 입력을 \'자주 사는 재료\'로 저장</button>'}
   </form>`;
@@ -663,14 +829,17 @@ function bindItemForm(form, it, onSave) {
   f.unit.addEventListener('change', () => { unitTouched = true; });
   const fillSlots = (keepId) => {
     const z = zoneById(zoneSel.value);
-    slotSel.innerHTML = z.slots.map((s) => `<option value="${s.id}">${s.door ? '🚪 ' : ''}${esc(s.name)}</option>`).join('');
+    slotSel.innerHTML = z.slots.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
     if (keepId && z.slots.find((s) => s.id === keepId)) slotSel.value = keepId;
   };
   const update = () => {
     const z = zoneById(zoneSel.value); const sl = slotOf(z, slotSel.value);
     const d = ruleDays(z.type, cat);
-    form.querySelector('.exp-hint').textContent = `· 추천: ${ZONE_TYPES[z.type].name} ${CAT[cat].name} +${d}일`;
-    if (!expTouched) f.expiry.value = addDays(todayStr(), d);
+    const madeOn = f.madeOn.checked && isYmd(f.made.value);
+    const base = madeOn ? f.made.value : todayStr();
+    form.querySelector('.exp-hint').textContent = `· 추천: ${ZONE_TYPES[z.type].name} ${CAT[cat].name} ${madeOn ? '만든 날' : ''} +${d}일`;
+    form.querySelector('.made-wrap').hidden = !f.madeOn.checked;
+    if (!expTouched) f.expiry.value = addDays(base, d);
     const showOpen = (sl && sl.door) || ['sauce', 'drink', 'dairy'].includes(cat) || !!f.opened.value;
     form.querySelector('.open-wrap').hidden = !showOpen;
     form.querySelector('.open-hint').textContent = `· 개봉 후 +${openDays(cat)}일 알림`;
@@ -682,6 +851,8 @@ function bindItemForm(form, it, onSave) {
   zoneSel.addEventListener('change', () => { fillSlots(); update(); });
   slotSel.addEventListener('change', update);
   f.expiry.addEventListener('input', () => { expTouched = true; });
+  f.madeOn.addEventListener('change', () => { if (f.madeOn.checked && !isYmd(f.made.value)) f.made.value = todayStr(); expTouched = false; update(); });
+  f.made.addEventListener('change', () => { expTouched = false; update(); });
   f.name.addEventListener('input', () => {
     if (catTouched) return;
     const g = guessCategory(f.name.value);
@@ -697,6 +868,7 @@ function bindItemForm(form, it, onSave) {
     if (act === 'auto') { expTouched = false; update(); }
     else if (act === 'openToday') { f.opened.value = todayStr(); }
     else if (act === 'openClear') { f.opened.value = ''; }
+    else if (act === 'showSize') { form.querySelector('.size-wrap').hidden = false; b.remove(); f.size.focus(); }
     else if (act === 'saveFreq') {
       const name = f.name.value.trim(); if (!name) { toast('재료 이름을 먼저 입력해 주세요'); return; }
       const z = zoneById(zoneSel.value); const sl = slotOf(z, slotSel.value);
@@ -714,7 +886,8 @@ function bindItemForm(form, it, onSave) {
     onSave({
       name, cat, zoneId: zoneSel.value, slotId: slotSel.value,
       size: f.size.value.trim(), count, unit: f.unit.value.trim() || '팩',
-      expiry: isYmd(f.expiry.value) ? f.expiry.value : '', opened: isYmd(f.opened.value) ? f.opened.value : '', memo: f.memo.value.trim()
+      expiry: isYmd(f.expiry.value) ? f.expiry.value : '', opened: isYmd(f.opened.value) ? f.opened.value : '',
+      made: f.madeOn.checked && isYmd(f.made.value) ? f.made.value : '', memo: f.memo.value.trim()
     });
   });
 }
@@ -722,7 +895,7 @@ function bindItemForm(form, it, onSave) {
 /* ---------- 8-4. 등록 탭 ---------- */
 function freqChips() {
   if (!S.freq.length) return '<p class="hint">아래 폼에서 ☆ 버튼으로 추가할 수 있어요.</p>';
-  return `<div class="chips">${S.freq.map((fq) => `<button class="chip" data-act="quickAdd" data-id="${fq.id}">${CAT[fq.cat] ? CAT[fq.cat].emoji : ''} ${esc(fq.name)}</button>`).join('')}</div>`;
+  return `<div class="chips">${S.freq.map((fq) => `<button class="chip" data-act="quickAdd" data-id="${fq.id}">+ ${esc(fq.name)}</button>`).join('')}</div>`;
 }
 
 function viewAdd() {
@@ -739,13 +912,13 @@ function viewAdd() {
       <p class="hint">구역을 안 쓰면 육류는 냉동실, 나머지는 냉장실로 들어가요. 소비기한은 자동 계산되며 '11/30', 'D-5', '+5일'처럼 직접 적어도 돼요.</p>
     </div>`;
     if (bulkRows.length) {
-      h += `<h2 class="sec">미리보기 <small>${bulkRows.length}개</small></h2><div class="card">${bulkRows.map((r, i) => `<div class="bulk-row"><span>${CAT[r.cat].emoji}</span><div class="grow"><b>${esc(r.name)}</b> ${r.size ? `<small>${esc(r.size)}</small>` : ''}<div class="meta">${fmtNum(r.count)}${esc(r.unit)} · ${esc(locText(r))} · ~${shortDate(r.expiry)}</div></div><button class="x" data-act="bulkDel" data-i="${i}" aria-label="빼기">✕</button></div>`).join('')}
+      h += `<h2 class="sec">미리보기 <small>${bulkRows.length}개</small></h2><div class="card">${bulkRows.map((r, i) => `<div class="bulk-row"><span class="pill">${esc(CAT[r.cat].name)}</span><div class="grow"><b>${esc(r.name)}</b> ${r.size ? `<small>${esc(r.size)}</small>` : ''}<div class="meta">${fmtNum(r.count)}${esc(r.unit)} · ${esc(locText(r))} · ~${shortDate(r.expiry)}</div></div><button class="x" data-act="bulkDel" data-i="${i}" aria-label="빼기">✕</button></div>`).join('')}
         <button class="btn primary block" style="margin-top:10px" data-act="bulkSave">${bulkRows.length}개 모두 등록</button></div>`;
     }
     return h;
   }
-  h += `<h2 class="sec">⚡ 자주 사는 재료 <small>탭하면 바로 등록</small></h2><div id="freqBox">${freqChips()}</div>`;
-  h += `<h2 class="sec">✍️ 직접 입력</h2><div class="card" id="addFormBox"></div>`;
+  h += `<h2 class="sec">자주 사는 재료 <small>탭하면 바로 등록</small></h2><div id="freqBox">${freqChips()}</div>`;
+  h += `<h2 class="sec">직접 입력</h2><div class="card" id="addFormBox"></div>`;
   return h;
 }
 
@@ -786,7 +959,7 @@ function quickAdd(id) {
 }
 
 /* ---------- 8-5. 추천 탭 ---------- */
-const TAG_NAMES = { kid: '👶 아이 반찬', adult: '🍲 어른용', bowl: '🍚 간단 한그릇' };
+const TAG_NAMES = { kid: '아이 반찬', adult: '어른용', bowl: '간단 한그릇' };
 function comboUrl(names) { return 'https://www.10000recipe.com/recipe/list.html?q=' + names.map((n) => encodeURIComponent(n)).join('+'); }
 
 function viewRecipe() {
@@ -798,7 +971,7 @@ function viewRecipe() {
   ownedSorted.forEach((it) => { const k = normName(it.name); if (!seen.has(k)) { seen.add(k); uniq.push(it); } });
   S.ui.combo = S.ui.combo.filter((n) => seen.has(normName(n)));
   const combo = S.ui.combo;
-  h += `<div class="card combo"><h2 class="sec" style="margin-top:0">🔎 만개의레시피 조합 찾기 <small>1~3개 선택</small></h2>`;
+  h += `<div class="card combo"><h2 class="sec" style="margin-top:0">만개의레시피 조합 찾기 <small>1~3개 선택</small></h2>`;
   if (uniq.length) {
     h += `<div class="chips">${uniq.map((it) => { const d = dueInfo(it); const on = combo.includes(it.name); return `<button class="chip ${on ? 'on' : ''} lv-${d.level}" data-act="combo" data-name="${esc(it.name)}">${esc(it.name)}${d.level === 'red' ? ' ⏰' : ''}</button>`; }).join('')}</div>
       <a class="btn primary block ${combo.length ? '' : 'disabled'}" style="margin-top:10px" target="_blank" rel="noopener" href="${combo.length ? esc(comboUrl(combo)) : '#'}">만개의레시피에서 조합 찾기${combo.length ? ` (${combo.map(esc).join('+')})` : ''} ↗</a>`;
@@ -806,7 +979,7 @@ function viewRecipe() {
   h += '</div>';
 
   // 기본 레시피 추천
-  h += `<h2 class="sec">🍳 냉장고 맞춤 추천 <small>매칭률·임박 재료 순</small></h2>
+  h += `<h2 class="sec">냉장고 맞춤 추천 <small>매칭률·임박 재료 순</small></h2>
     <div class="chips scroll">${['all', 'kid', 'adult', 'bowl'].map((t) => `<button class="chip ${S.ui.recipeTag === t ? 'on' : ''}" data-act="rTag" data-tag="${t}">${t === 'all' ? '전체' : TAG_NAMES[t]}</button>`).join('')}</div>
     <label class="check"><input type="checkbox" data-act="rOwned" ${S.ui.recipeOwned ? 'checked' : ''}> 보유 재료가 1개 이상 들어가는 것만</label>`;
   let list = window.RECIPES.map((r, idx) => ({ ...scoreRecipe(r, owned), idx }));
@@ -825,7 +998,7 @@ function viewRecipe() {
       <div class="ing">${x.have.map((hv) => `<span class="have lv-${hv.d.level}" title="${esc(hv.item.name)}">✓ ${esc(hv.ing)}${hv.d.level === 'red' ? ` ${ddayText(hv.d.left)}` : ''}</span>`).join('')}${x.miss.map((m) => `<span class="miss">${esc(m)}</span>`).join('')}</div>
       <div class="tags">${x.r.t.map((t) => `<span class="pill">${TAG_NAMES[t]}</span>`).join('')}</div>
       <details class="steps"><summary>조리 요약 보기</summary><p>${esc(x.r.s)}</p></details>
-      <div class="btn-row">${x.miss.length ? `<button class="btn sm ghost" data-act="missToShop" data-i="${x.idx}">🛒 부족 ${x.miss.length}개 담기</button>` : '<span class="pill green" style="align-self:center">재료 다 있어요!</span>'}
+      <div class="btn-row">${x.miss.length ? `<button class="btn sm ghost" data-act="missToShop" data-i="${x.idx}">부족 ${x.miss.length}개 장보기 담기</button>` : '<span class="pill green" style="align-self:center">재료 다 있어요!</span>'}
       <a class="btn sm ghost" target="_blank" rel="noopener" href="${esc(comboUrl([x.r.n]))}">만개의레시피 ↗</a></div>
     </article>`;
   }).join('');
@@ -838,13 +1011,13 @@ function viewShop() {
   const inList = new Set(S.shopping.filter((x) => !x.done).map((x) => x.name));
   const sugg = [...new Set(S.items.filter((i) => i.count <= 0 || (i.count <= 1 && dueInfo(i).level === 'red')).map((i) => i.name))].filter((n) => !inList.has(n));
   let h = `<form class="card inline" id="shopForm"><input id="shopInput" placeholder="살 것 입력 (예: 대파)" enterkeyhint="done"><button class="btn primary" type="submit">추가</button></form>`;
-  if (sugg.length) h += `<h2 class="sec">💡 다 썼거나 거의 없는 재료</h2><div class="chips">${sugg.map((n) => `<button class="chip" data-act="shopAddName" data-name="${esc(n)}">+ ${esc(n)}</button>`).join('')}</div>`;
-  h += `<h2 class="sec">🛒 살 것 <small>${undone.length}개</small></h2>`;
+  if (sugg.length) h += `<h2 class="sec">다 썼거나 거의 없는 재료</h2><div class="chips">${sugg.map((n) => `<button class="chip" data-act="shopAddName" data-name="${esc(n)}">+ ${esc(n)}</button>`).join('')}</div>`;
+  h += `<h2 class="sec">살 것 <small>${undone.length}개</small></h2>`;
   const row = (x) => `<div class="shop-row ${x.done ? 'done' : ''}"><label><input type="checkbox" data-act="shopToggle" data-id="${x.id}" ${x.done ? 'checked' : ''}><span>${esc(x.name)}</span></label>
     <button class="btn sm ghost" data-act="shopIn" data-id="${x.id}">입고</button><button class="x" data-act="shopDel" data-id="${x.id}" aria-label="삭제">✕</button></div>`;
-  h += undone.length ? `<div class="card">${undone.map(row).join('')}</div>` : '<p class="empty">살 것이 없어요 👍</p>';
-  if (done.length) h += `<h2 class="sec">✅ 산 것 <small>${done.length}개</small></h2><div class="card">${done.map(row).join('')}</div>`;
-  h += `<div class="btn-row" style="margin-top:8px"><button class="btn ghost" data-act="shopShare" ${undone.length ? '' : 'disabled'}>📤 목록 공유</button><button class="btn ghost" data-act="shopClear" ${done.length ? '' : 'disabled'}>산 것 지우기</button></div>
+  h += undone.length ? `<div class="card">${undone.map(row).join('')}</div>` : '<p class="empty">살 것이 없어요</p>';
+  if (done.length) h += `<h2 class="sec">산 것 <small>${done.length}개</small></h2><div class="card">${done.map(row).join('')}</div>`;
+  h += `<div class="btn-row" style="margin-top:8px"><button class="btn ghost" data-act="shopShare" ${undone.length ? '' : 'disabled'}>목록 공유</button><button class="btn ghost" data-act="shopClear" ${done.length ? '' : 'disabled'}>산 것 지우기</button></div>
     <p class="hint">'입고'를 누르면 재료 등록 화면으로 이동하고, 저장하면 장보기 목록에서 빠져요.</p>`;
   return h;
 }
@@ -867,40 +1040,44 @@ window.addEventListener('appinstalled', () => { deferredInstall = null; toast('�
 
 function viewSettings() {
   const standalone = window.matchMedia('(display-mode: standalone)').matches;
-  let h = `<h2 class="sec">🗂️ 보관 구역 <small>김치냉장고·보조냉동고 추가 가능</small></h2><div class="card">`;
+  let h = `<h2 class="sec" style="margin-top:4px">이번 달 살림 성적</h2>${statCard(false)}`;
+  h += `<h2 class="sec">보관 구역 <small>김치냉장고·보조냉동고 추가 가능</small></h2><div class="card">`;
   h += S.zones.map((z, i) => `<div class="zone-row" data-zid="${z.id}">
       <input value="${esc(z.name)}" data-zf="name" aria-label="구역 이름">
-      <select data-zf="type" aria-label="구역 종류">${Object.entries(ZONE_TYPES).map(([k, t]) => `<option value="${k}" ${z.type === k ? 'selected' : ''}>${t.emoji} ${t.name}</option>`).join('')}</select>
+      <select data-zf="type" aria-label="구역 종류">${Object.entries(ZONE_TYPES).map(([k, t]) => `<option value="${k}" ${z.type === k ? 'selected' : ''}>${t.name}</option>`).join('')}</select>
       <div class="zone-btns">
         <button class="icon-btn" data-zm="up" ${i === 0 ? 'disabled' : ''} aria-label="위로">↑</button>
         <button class="icon-btn" data-zm="down" ${i === S.zones.length - 1 ? 'disabled' : ''} aria-label="아래로">↓</button>
         <button class="icon-btn" data-zm="del" aria-label="삭제">🗑️</button>
       </div>
     </div>`).join('');
-  h += `<form class="zone-row" id="zoneAdd"><input name="zname" placeholder="새 구역 (예: 김치냉장고)"><select name="ztype">${Object.entries(ZONE_TYPES).map(([k, t]) => `<option value="${k}">${t.emoji} ${t.name}</option>`).join('')}</select><button class="btn primary sm" type="submit">추가</button></form>
+  h += `<form class="zone-row" id="zoneAdd"><input name="zname" placeholder="새 구역 (예: 김치냉장고)"><select name="ztype">${Object.entries(ZONE_TYPES).map(([k, t]) => `<option value="${k}">${t.name}</option>`).join('')}</select><button class="btn primary sm" type="submit">추가</button></form>
     <p class="hint">'종류'가 소비기한 계산 기준이에요. 칸 추가·이름 변경은 냉장고 탭의 각 구역 화면에서 할 수 있어요.</p></div>`;
 
-  h += `<h2 class="sec">📅 소비기한 기준표 <small>오늘 + N일</small></h2><div class="card"><table class="rules"><thead><tr><th>카테고리</th>${Object.values(ZONE_TYPES).map((t) => `<th>${t.name}</th>`).join('')}<th>개봉 후</th></tr></thead><tbody>
-    ${CATEGORIES.map((c) => `<tr><td>${c.emoji} ${c.name}</td>${Object.keys(ZONE_TYPES).map((t) => `<td><input type="number" inputmode="numeric" min="0" data-rule="${t}.${c.id}" value="${ruleDays(t, c.id)}"></td>`).join('')}<td><input type="number" inputmode="numeric" min="0" data-open="${c.id}" value="${openDays(c.id)}"></td></tr>`).join('')}
+  h += `<details class="card acc" style="margin-top:12px" ${S.ui.rulesOpen ? 'open' : ''} id="rulesAcc"><summary><span>소비기한 기준표<small>오늘 + N일 · 눌러서 펼치기</small></span></summary><div class="acc-body">
+    <table class="rules"><thead><tr><th>카테고리</th>${Object.values(ZONE_TYPES).map((t) => `<th>${t.name}</th>`).join('')}<th>개봉 후</th></tr></thead><tbody>
+    ${CATEGORIES.map((c) => `<tr><td>${c.name}</td>${Object.keys(ZONE_TYPES).map((t) => `<td><input type="number" inputmode="numeric" min="0" data-rule="${t}.${c.id}" value="${ruleDays(t, c.id)}"></td>`).join('')}<td><input type="number" inputmode="numeric" min="0" data-open="${c.id}" value="${openDays(c.id)}"></td></tr>`).join('')}
     </tbody></table><button class="btn text sm" data-act="rulesReset">기본값으로 되돌리기</button>
-    <p class="hint">냉동실에서 냉장실로 옮기면(해동) 육류·채소는 최대 2일로 다시 계산해요.</p></div>`;
+    <p class="hint">냉동실에서 냉장실로 옮기면(해동) 육류·채소는 최대 2일로 다시 계산해요.</p></div></details>`;
 
-  h += `<h2 class="sec">⚡ 자주 사는 재료 <small>탭해서 삭제</small></h2><div class="card"><div class="chips">${S.freq.map((fq) => `<button class="chip" data-act="freqDel" data-id="${fq.id}">${esc(fq.name)} <span class="x">✕</span></button>`).join('') || '<span class="hint">없음</span>'}</div>
+  h += `<h2 class="sec">자주 사는 재료 <small>탭해서 삭제</small></h2><div class="card"><div class="chips">${S.freq.map((fq) => `<button class="chip" data-act="freqDel" data-id="${fq.id}">${esc(fq.name)} <span class="x">✕</span></button>`).join('') || '<span class="hint">없음</span>'}</div>
     <p class="hint">등록 탭의 '☆ 자주 사는 재료로 저장'으로 추가해요.</p><button class="btn text sm" data-act="freqReset">기본 목록 불러오기</button></div>`;
 
-  h += `<h2 class="sec">💾 백업 <small>마지막 백업: ${S.lastBackup || '없음'}</small></h2><div class="card">
+  h += `<h2 class="sec">백업 <small>마지막 백업: ${S.lastBackup || '없음'}</small></h2><div class="card">
     <div class="btn-row"><button class="btn primary" data-act="export">JSON 내보내기</button><label class="btn ghost">가져오기<input type="file" id="importFile" accept="application/json,.json" hidden></label></div>
     <p class="hint">데이터는 이 기기 브라우저에만 저장돼요. 폰을 바꾸거나 브라우저 데이터를 지우기 전에 꼭 내보내 두세요.</p>
     <button class="btn danger block" data-act="resetAll">모든 데이터 초기화</button></div>`;
 
-  h += `<h2 class="sec">📱 앱 설치</h2><div class="card">${standalone ? '<p class="hint" style="margin:0">✅ 앱으로 실행 중이에요.</p>'
+  h += `<h2 class="sec">앱 설치</h2><div class="card">${standalone ? '<p class="hint" style="margin:0">앱으로 실행 중이에요.</p>'
     : deferredInstall ? '<button class="btn primary block" data-act="install">홈 화면에 앱 설치</button>'
       : '<p class="hint" style="margin:0">크롬 오른쪽 위 ⋮ 메뉴 → <b>홈 화면에 추가</b>(또는 <b>앱 설치</b>)를 누르세요. https 주소에서 열어야 설치 메뉴가 떠요.</p>'}</div>
-    <p class="hint" style="text-align:center">앱 버전 ${APP_VERSION} · 레시피 ${window.RECIPES.length}종 내장 · 오프라인 사용 가능</p>`;
+    <p class="hint" style="text-align:center">냉털집사 ${APP_VERSION} · 레시피 ${window.RECIPES.length}종 내장 · 오프라인 사용 가능</p>`;
   return h;
 }
 
 function mountSettings(v) {
+  const acc = $('#rulesAcc', v);
+  if (acc) acc.addEventListener('toggle', () => { S.ui.rulesOpen = acc.open; }); // 화면을 다시 그려도 펼친 상태 유지 (기본은 접힘)
   // 구역 이름/종류 변경
   v.querySelectorAll('.zone-row[data-zid]').forEach((row) => {
     const z = zoneById(row.dataset.zid);
@@ -932,7 +1109,7 @@ function mountSettings(v) {
     if (!name) { toast('구역 이름을 입력해 주세요'); return; }
     const slots = /김치/.test(name) ? ['상칸', '중칸', '하칸'].map((n) => ({ id: uid(), name: n, door: false })) : defaultSlotsFor(type);
     const z = { id: uid(), name, type, slots };
-    S.zones.push(z); S.ui.zoneId = z.id; commit(); toast(`'${name}' 구역 추가! 🧩로 칸을 바꿀 수 있어요`);
+    S.zones.push(z); S.ui.zoneId = z.id; commit(); toast(`'${name}' 구역 추가 · 칸은 냉장고 탭에서 바꿀 수 있어요`);
   });
   // 기준표
   v.querySelectorAll('[data-rule]').forEach((inp) => inp.addEventListener('change', () => {
@@ -964,12 +1141,12 @@ function slotManager(zid) {
   const draw = (root) => {
     root.innerHTML = `${z.slots.map((s, i) => `<div class="slot-edit" data-i="${i}">
       <input value="${esc(s.name)}" aria-label="칸 이름">
-      <button class="icon-btn ${s.door ? 'on' : ''}" data-sm="door" title="개봉일 기록 칸(문쪽)" aria-label="개봉일 칸 전환">🚪</button>
+      <button class="icon-btn ${s.door ? 'on' : ''}" data-sm="door" title="개봉일 기록 칸(문쪽)" aria-label="개봉일 칸 전환" style="width:auto;padding:0 8px;font-size:12px;font-weight:700">개봉</button>
       <button class="icon-btn" data-sm="up" ${i === 0 ? 'disabled' : ''} aria-label="위로">↑</button>
       <button class="icon-btn" data-sm="down" ${i === z.slots.length - 1 ? 'disabled' : ''} aria-label="아래로">↓</button>
       <button class="icon-btn" data-sm="del" aria-label="삭제">🗑️</button></div>`).join('')}
       <button class="btn ghost block" data-sm="add">+ 칸 추가</button>
-      <p class="hint">🚪 켜진 칸은 등록할 때 개봉일 입력이 기본으로 보이고 '개봉 +N일' 배지가 붙어요.</p>`;
+      <p class="hint">'개봉' 버튼이 켜진 칸(문쪽 등)은 등록할 때 개봉일 입력이 기본으로 보이고 '개봉 +N일' 배지가 붙어요.</p>`;
   };
   openSheet(`${z.name} 칸 편집`, '', (root) => {
     draw(root);
@@ -1001,7 +1178,7 @@ function slotManager(zid) {
 function addSlotPrompt(zid) {
   const z = zoneById(zid); if (!z) return;
   openSheet(`${z.name}에 칸 추가`, `<form class="form"><label class="fld"><span>칸 이름</span><input name="n" placeholder="예: 반찬통 칸, 아기 이유식 칸" enterkeyhint="done"></label>
-    <label class="check"><input type="checkbox" name="door"> 🚪 개봉일 기록 칸 (소스·음료 등)</label><button class="btn primary block" type="submit">추가</button></form>`, (root) => {
+    <label class="check"><input type="checkbox" name="door"> 개봉일 기록 칸 (소스·음료 등)</label><button class="btn primary block" type="submit">추가</button></form>`, (root) => {
     const form = root.querySelector('form');
     setTimeout(() => form.n.focus(), 50);
     form.addEventListener('submit', (e) => {
@@ -1023,7 +1200,7 @@ const ACTIONS = {
   mode(el) { S.ui.mode = el.dataset.mode; commit(); },
   toggleSlot(el) { const id = el.dataset.slot; const cur = S.ui.open[id] ?? el.dataset.def === '1'; S.ui.open[id] = !cur; commit(); },
   use(el) { useOne(el.dataset.id); },
-  toShop(el) { const it = itemById(el.dataset.id); if (!it) return; const ok = addToShopping(it.name); S.items = S.items.filter((x) => x !== it); commit(); toast(ok ? `${it.name} 장보기에 담고 정리했어요` : '이미 장보기 목록에 있어요'); },
+  toShop(el) { const it = itemById(el.dataset.id); if (it) finishSheet(it, false); },
   itemMenu(el) { itemMenu(el.dataset.id); },
   addSlot(el) { addSlotPrompt(el.dataset.zone); },
   manageSlots(el) { slotManager(el.dataset.zone); },
@@ -1060,7 +1237,7 @@ const ACTIONS = {
   },
   shopToggle(el) { const x = S.shopping.find((s) => s.id === el.dataset.id); if (x) { x.done = el.checked; commit(); } },
   shopDel(el) { S.shopping = S.shopping.filter((s) => s.id !== el.dataset.id); commit(); },
-  shopAddName(el) { addToShopping(el.dataset.name); commit(); },
+  shopAddName(el) { const ok = addToShopping(el.dataset.name); commit(); toast(ok ? `${el.dataset.name} 장보기에 담았어요` : '이미 장보기 목록에 있어요'); },
   shopIn(el) { const x = S.shopping.find((s) => s.id === el.dataset.id); if (!x) return; pendingPrefill = { data: { name: x.name }, shopId: x.id }; S.ui.addMode = 'single'; S.ui.tab = 'add'; commit(); window.scrollTo(0, 0); },
   shopClear() { S.shopping = S.shopping.filter((s) => !s.done); commit(); },
   async shopShare() {

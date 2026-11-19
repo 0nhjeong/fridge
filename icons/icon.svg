@@ -1,8 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <rect width="100" height="100" rx="22" fill="#2f855a"/>
-  <rect x="28" y="17" width="44" height="66" rx="7" fill="#fff"/>
-  <line x1="28" y1="42" x2="72" y2="42" stroke="#2f855a" stroke-width="2.5"/>
-  <line x1="37" y1="25" x2="37" y2="35" stroke="#2f855a" stroke-width="3" stroke-linecap="round"/>
-  <line x1="37" y1="50" x2="37" y2="63" stroke="#2f855a" stroke-width="3" stroke-linecap="round"/>
-  <circle cx="55" cy="57" r="3.5" fill="#f6ad55"/>
+  <rect width="100" height="100" rx="23" fill="#FAF8F4"/>
+  <rect x="27.6" y="18" width="44.8" height="64" rx="8" fill="#2E6F4E"/>
+  <line x1="27.6" y1="41" x2="72.4" y2="41" stroke="#FAF8F4" stroke-width="2.2"/>
+  <line x1="63.4" y1="27" x2="63.4" y2="34.6" stroke="#FAF8F4" stroke-width="2.8" stroke-linecap="round"/>
+  <line x1="63.4" y1="47.4" x2="63.4" y2="57.7" stroke="#FAF8F4" stroke-width="2.8" stroke-linecap="round"/>
+  <path d="M46.4 57.7 L34.8 50.1 L34.8 65.3 Z M46.4 57.7 L58 50.1 L58 65.3 Z" fill="#E7A35A"/>
+  <circle cx="46.4" cy="57.7" r="2.9" fill="#E7A35A"/>
 </svg>
