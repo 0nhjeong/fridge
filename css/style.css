@@ -291,6 +291,8 @@ details.acc > .acc-body { padding: 0 14px 14px; }
 .rules th:first-child, .rules td:first-child { text-align: left; white-space: nowrap; }
 .rules input { min-height: 38px; padding: 0 4px; text-align: center; font-size: 15px; }
 
+.push-error { margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--red-soft); color: var(--red); font-size: 13px; font-weight: 600; line-height: 1.5; }
+
 /* ===== 소분·정리템 (쿠팡 파트너스) ===== */
 .disclosure { margin: -4px 2px 10px; font-size: 12px; }
 .pick { display: flex; align-items: center; gap: 12px; background: linear-gradient(160deg, var(--primary-soft), var(--card) 75%); }

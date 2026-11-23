@@ -4,7 +4,7 @@
  * 동작 방식: 인터넷이 되면 항상 서버의 최신 파일을 쓰고(network-first),
  *           인터넷이 안 되거나 4초 넘게 느리면 저장해 둔 파일로 실행해요(오프라인 지원).
  */
-const CACHE = 'fridge-pwa-v7';
+const CACHE = 'fridge-pwa-v8';
 const FONT_CACHE = 'fridge-fonts-v1'; // Pretendard 웹폰트(외부 CDN) — 한 번 받으면 오프라인에서도 사용
 const FONT_HOST = 'cdn.jsdelivr.net';
 const ASSETS = [

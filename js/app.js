@@ -7,7 +7,7 @@
  * 1. 상수 · 기본값
  * ========================================================= */
 const STORE_KEY = 'fridge-pwa-v1'; // 저장 데이터 이름 (바꾸면 기존 데이터를 못 읽으니 그대로 두기)
-const APP_VERSION = 'v7'; // 배포할 때 sw.js의 CACHE 숫자와 같이 올리기
+const APP_VERSION = 'v8'; // 배포할 때 sw.js의 CACHE 숫자와 같이 올리기
 const LOG_MAX = 1000; // 소진 기록 최대 보관 개수
 
 const CATEGORIES = [
@@ -518,7 +518,24 @@ function itemsSummary() {
 }
 function withTimeout(p, ms, msg) { return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(msg || 'timeout')), ms))]); }
 async function swReg() { return withTimeout(navigator.serviceWorker.ready, 8000, 'sw_not_ready'); }
+// 알림 켜기 진행 상태 (설정 화면에 그대로 보여 줌 — 어디서 막혔는지 알 수 있게)
+var pushUi = { busy: false, step: '', error: '' };
+function setPushStep(step) { pushUi.step = step; const el = document.getElementById('pushStatus'); if (el) el.textContent = `켜는 중… ${step}`; }
+// 오류를 사람이 읽을 수 있는 말로 (코드도 함께 보여 줘서 문의할 때 쓸 수 있게)
+function pushErrorText(e) {
+  const m = (e && (e.message || e.name)) || String(e);
+  const name = (e && e.name) || '';
+  if (m === 'sw_not_ready') return '앱 준비(서비스 워커)가 아직 안 됐어요. 앱을 완전히 닫았다 다시 열어 주세요 [sw_not_ready]';
+  if (m === 'subscribe_timeout') return "푸시 서비스가 응답하지 않아요. 폰 설정 → 애플리케이션 → 크롬(또는 냉털집사) → 알림 허용, 절전·데이터 절약 모드 해제 후 다시 시도해 주세요 [subscribe_timeout]";
+  if (name === 'NotAllowedError') return `알림 권한이 막혀 있어요. 폰 설정에서 알림을 허용해 주세요 [${name}]`;
+  if (name === 'AbortError' || name === 'NotSupportedError' || /push service|Registration failed/i.test(m)) return `폰의 푸시 서비스(구글)에 등록하지 못했어요. 크롬 최신 버전·구글 플레이 서비스를 확인해 주세요 [${name || m}]`;
+  if (name === 'InvalidStateError' || name === 'InvalidAccessError') return `푸시 키가 맞지 않아요. 알림을 껐다가 다시 켜 주세요 [${name}]`;
+  if (/^sync_(timeout|network)$/.test(m) || name === 'TypeError') return `서버에 연결하지 못했어요. 인터넷 연결을 확인해 주세요 [${m}]`;
+  if (/^sync_\d+/.test(m)) return `서버 저장에 실패했어요 [${m}]`;
+  return `알림을 켜지 못했어요 [${name ? name + ': ' : ''}${m}]`.slice(0, 200);
+}
 async function ensureSubscription() {
+  setPushStep('(1/3 앱 준비 확인)');
   const reg = await swReg();
   const key = b64urlToU8(PUSH_CFG.VAPID_PUBLIC_KEY);
   let sub = await reg.pushManager.getSubscription();
@@ -527,7 +544,10 @@ async function ensureSubscription() {
     const cur = sub.options && sub.options.applicationServerKey ? new Uint8Array(sub.options.applicationServerKey) : null;
     if (cur && (cur.length !== key.length || cur.some((v, i) => v !== key[i]))) { await sub.unsubscribe(); sub = null; }
   }
-  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+  if (!sub) {
+    setPushStep('(2/3 푸시 서비스 등록)');
+    sub = await withTimeout(reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }), 20000, 'subscribe_timeout');
+  }
   return sub;
 }
 function schedulePushSync(delay = 1500) {
@@ -545,29 +565,39 @@ async function pushSync(force) {
   const subJson = sub.toJSON();
   const sig = JSON.stringify([subJson.endpoint, t.h, t.m, S.notify.daysBefore, items]);
   if (!force && sig === pushLastSig) return true; // 바뀐 게 없으면 서버 호출 안 함
-  const res = await fetch(`${supaBase()}/rest/v1/rpc/upsert_push_device`, {
-    method: 'POST', headers: supaHeaders(),
-    body: JSON.stringify({ p_device_id: id, p_secret: secret, p_subscription: subJson, p_notify_hour: t.h, p_notify_minute: t.m, p_days_before: S.notify.daysBefore, p_items_summary: items })
-  });
-  if (!res.ok) throw new Error(`sync_${res.status}`);
+  if (pushUi.busy) setPushStep('(3/3 서버에 저장)');
+  const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 15000);
+  let res;
+  try {
+    res = await fetch(`${supaBase()}/rest/v1/rpc/upsert_push_device`, {
+      method: 'POST', headers: supaHeaders(), signal: ctrl.signal,
+      body: JSON.stringify({ p_device_id: id, p_secret: secret, p_subscription: subJson, p_notify_hour: t.h, p_notify_minute: t.m, p_days_before: S.notify.daysBefore, p_items_summary: items })
+    });
+  } catch (e) { throw new Error(e && e.name === 'AbortError' ? 'sync_timeout' : 'sync_network'); }
+  finally { clearTimeout(timer); }
+  if (!res.ok) { const body = await res.text().catch(() => ''); console.warn('sync failed', res.status, body); throw new Error(`sync_${res.status}${/forbidden/.test(body) ? '_forbidden' : ''}`); }
   pushLastSig = sig;
   return true;
 }
 async function enablePush() {
   if (!pushSupported()) { toast(isIOS() && !isStandalone() ? "아이폰은 Safari 공유 → '홈 화면에 추가'로 설치한 앱에서 켜 주세요" : '이 브라우저는 푸시 알림을 지원하지 않아요'); return false; }
   if (!pushConfigured()) { toast('관리자 설정이 필요해요: js/config.js에 Supabase·VAPID 키를 넣어 주세요'); return false; }
-  const perm = await Notification.requestPermission();
-  if (perm !== 'granted') { toast('알림 권한이 허용되지 않았어요. 브라우저 설정에서 알림을 허용해 주세요'); return false; }
+  pushUi = { busy: true, step: '', error: '' };
   try {
+    setPushStep('(권한 확인)');
+    const perm = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
+    if (perm !== 'granted') throw Object.assign(new Error('permission_' + perm), { name: 'NotAllowedError' });
     await ensureSubscription();
     S.notify.enabled = true; saveNow();
     await pushSync(true);
+    pushUi = { busy: false, step: '', error: '' };
     toast(`매일 ${notifyTimeText()}에 임박 재료를 알려 드릴게요`);
     return true;
   } catch (e) {
-    console.warn(e);
+    console.warn('enablePush failed', e);
     S.notify.enabled = false; saveNow();
-    toast(e.message === 'sw_not_ready' ? '앱 준비가 덜 됐어요. 잠시 후 다시 켜 주세요' : '알림을 켜지 못했어요. 인터넷 연결을 확인해 주세요');
+    pushUi = { busy: false, step: '', error: pushErrorText(e) };
+    toast(pushUi.error);
     return false;
   }
 }
@@ -584,7 +614,7 @@ async function disablePush() {
   toast('요약 알림을 껐어요');
 }
 async function sendTestPush() {
-  if (!S.notify.enabled) { toast('먼저 요약 알림을 켜 주세요'); return; }
+  if (!S.notify.enabled) { toast(pushUi.busy ? '알림을 켜는 중이에요. 잠시만 기다려 주세요' : "먼저 위의 '임박 재료 요약 알림' 스위치를 켜 주세요"); return; }
   if (pushBusy) return;
   pushBusy = true;
   try {
@@ -1198,11 +1228,13 @@ function notifySection() {
   const ready = pushConfigured();
   const status = !pushSupported() ? (isIOS() && !isStandalone() ? '홈 화면에 추가한 앱에서 켤 수 있어요' : '이 브라우저는 푸시를 지원하지 않아요')
     : !ready ? '관리자 설정 필요 (js/config.js)'
-      : n.enabled ? `매일 ${notifyTimeText()} · ${n.daysBefore}일 이내 임박 재료` : '꺼져 있어요';
+      : pushUi.busy ? `켜는 중… ${pushUi.step}`
+        : n.enabled ? `켜짐 · 매일 ${notifyTimeText()} · ${n.daysBefore}일 이내 임박 재료` : '꺼져 있어요';
   const hours = Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${n.hour === h ? 'selected' : ''}>${hourLabel(h)}</option>`).join('');
   return `<h2 class="sec">소비기한 알림 <small>하루 1번 요약</small></h2><div class="card form">
-    <div class="toggle-row"><span class="t">임박 재료 요약 알림<small>${esc(status)}</small></span>
-      <label class="switch"><input type="checkbox" id="pushToggle" ${n.enabled ? 'checked' : ''} aria-label="소비기한 요약 알림"><i></i></label></div>
+    <div class="toggle-row"><span class="t">임박 재료 요약 알림<small id="pushStatus">${esc(status)}</small></span>
+      <label class="switch"><input type="checkbox" id="pushToggle" ${n.enabled || pushUi.busy ? 'checked' : ''} ${pushUi.busy ? 'disabled' : ''} aria-label="소비기한 요약 알림"><i></i></label></div>
+    ${pushUi.error && !n.enabled ? `<p class="push-error" role="alert">${esc(pushUi.error)}</p>` : ''}
     <div class="fld"><span>알림 시간</span>
       <div class="chips">
         <button type="button" class="chip ${n.preset === '0830' ? 'on' : ''}" data-act="notifyPreset" data-p="0830">오전 8:30 (아침·장보기 전)</button>
@@ -1214,7 +1246,7 @@ function notifySection() {
     <div class="fld"><span>임박 기준</span>
       <div class="seg" style="margin:0">${[1, 2, 3].map((d) => `<button type="button" data-act="notifyDays" data-d="${d}" class="${n.daysBefore === d ? 'on' : ''}">${d === 1 ? '1일 전(당일 포함)' : `${d}일 전 이내`}</button>`).join('')}</div>
     </div>
-    <button type="button" class="btn ghost block" data-act="pushTest" ${n.enabled ? '' : 'disabled'}>테스트 알림 바로 보내기</button>
+    <button type="button" class="btn ghost block" data-act="pushTest">테스트 알림 바로 보내기</button>
     <p class="hint" style="margin:0">아이폰은 Safari 공유 버튼 → '홈 화면에 추가'로 설치한 앱에서 알림을 켜야 푸시가 와요</p>
   </div>`;
 }
