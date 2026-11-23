@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>VAPID 키 생성기</title>
+  <style>
+    :root { --bg: #FAF8F4; --card: #fff; --line: #ECE8DF; --text: #2B2A26; --sub: #85807A; --primary: #2E6F4E; --red: #D9604A; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #171613; --card: #211F1B; --line: #35322C; --text: #EFEBE3; --sub: #A39D93; --primary: #6DB58C; } }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 -apple-system, "Pretendard", "Malgun Gothic", sans-serif; }
+    main { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { font-size: 20px; color: var(--primary); }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin: 14px 0; }
+    textarea { width: 100%; box-sizing: border-box; min-height: 90px; border: 1px solid var(--line); border-radius: 10px; padding: 10px; font: 12.5px/1.5 ui-monospace, Consolas, monospace; background: var(--bg); color: var(--text); }
+    button { font: inherit; border: 0; border-radius: 10px; padding: 0 16px; min-height: 44px; font-weight: 700; background: var(--primary); color: #fff; cursor: pointer; }
+    button.ghost { background: transparent; color: var(--primary); border: 1px solid var(--line); min-height: 36px; font-size: 13px; }
+    .warn { color: var(--red); font-weight: 700; }
+    small, .sub { color: var(--sub); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>냉털집사 · VAPID 키 생성기</h1>
+  <p class="sub">이 페이지는 키를 <b>내 브라우저 안에서만</b> 만들어요. 서버로 전송하지 않아요. 한 번 만들어서 아래 두 곳에 넣으면 끝이에요.</p>
+  <button id="gen">키 만들기</button>
+
+  <div class="card" id="out" hidden>
+    <p><b>① Supabase Secret <code>VAPID_KEYS</code></b> <span class="warn">(비밀 — 절대 공개 금지)</span><br>
+      <small>Edge Function Secrets에 이름 VAPID_KEYS, 값으로 이 한 줄을 그대로 넣으세요.</small></p>
+    <textarea id="secret" readonly></textarea>
+    <button class="ghost" data-copy="secret">복사</button>
+
+    <p style="margin-top:18px"><b>② 프론트용 공개키 <code>VAPID_PUBLIC_KEY</code></b> <small>(공개돼도 괜찮아요)</small><br>
+      <small>js/config.js 의 VAPID_PUBLIC_KEY 에 넣으세요.</small></p>
+    <textarea id="pub" readonly style="min-height:60px"></textarea>
+    <button class="ghost" data-copy="pub">복사</button>
+    <p class="sub" style="margin-top:14px">⚠️ 키를 다시 만들면 이미 켜 둔 알림 구독은 모두 다시 켜야 해요. 한 번 만든 키는 따로 안전하게 보관하세요.</p>
+  </div>
+</main>
+<script>
+  const b64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const fromB64url = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), (c) => c.charCodeAt(0));
+  document.getElementById('gen').addEventListener('click', async () => {
+    // VAPID = ECDSA P-256 키쌍. @negrel/webpush 의 importVapidKeys()가 받는 {publicKey, privateKey} JWK 형식으로 내보냄
+    const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const publicKey = await crypto.subtle.exportKey('jwk', keys.publicKey);
+    const privateKey = await crypto.subtle.exportKey('jwk', keys.privateKey);
+    // 브라우저 applicationServerKey = 0x04 || x || y (비압축 공개키, base64url)
+    const x = fromB64url(publicKey.x), y = fromB64url(publicKey.y);
+    const raw = new Uint8Array(65); raw[0] = 4; raw.set(x, 1); raw.set(y, 33);
+    document.getElementById('secret').value = JSON.stringify({ publicKey, privateKey });
+    document.getElementById('pub').value = b64url(raw);
+    document.getElementById('out').hidden = false;
+  });
+  document.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-copy]'); if (!b) return;
+    const t = document.getElementById(b.dataset.copy);
+    try { await navigator.clipboard.writeText(t.value); b.textContent = '복사됨'; } catch { t.select(); document.execCommand('copy'); b.textContent = '복사됨'; }
+    setTimeout(() => { b.textContent = '복사'; }, 1500);
+  });
+</script>
+</body>
+</html>

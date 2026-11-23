@@ -81,3 +81,11 @@ Application 탭 → Manifest / Service Workers에서 설치 가능 여부를 확
   기기 변경·주소 변경·크롬 데이터 삭제 전에는 **설정 → JSON 내보내기**로 백업하고, 새 곳에서 **가져오기** 하세요.
 - 만개의레시피는 검색 주소만 새 창으로 여는 방식이라 크롤링·API 키가 필요 없습니다.
 - 소비기한 기준은 일반적인 가정 보관 권장치예요. 제품 포장의 표시 기한을 우선해 주세요.
+
+## 소비기한 요약 푸시 알림 (선택)
+
+하루 1번 임박 재료 요약 알림은 Supabase(무료)와 연결해야 동작해요. 설정 순서는 [supabase/README.md](supabase/README.md)를 보세요.
+- `js/config.js` : 공개해도 되는 값(Supabase URL, anon 키, VAPID 공개키)만 넣는 곳
+- `supabase/schema.sql` : 테이블·RPC·cron SQL
+- `supabase/functions/send-daily-push/index.ts` : 발송 Edge Function
+- `tools/vapid-keygen.html` : VAPID 키 생성기 (브라우저 안에서만 생성)

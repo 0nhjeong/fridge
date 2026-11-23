@@ -4,13 +4,14 @@
  * 동작 방식: 인터넷이 되면 항상 서버의 최신 파일을 쓰고(network-first),
  *           인터넷이 안 되거나 4초 넘게 느리면 저장해 둔 파일로 실행해요(오프라인 지원).
  */
-const CACHE = 'fridge-pwa-v6';
+const CACHE = 'fridge-pwa-v7';
 const FONT_CACHE = 'fridge-fonts-v1'; // Pretendard 웹폰트(외부 CDN) — 한 번 받으면 오프라인에서도 사용
 const FONT_HOST = 'cdn.jsdelivr.net';
 const ASSETS = [
   './',
   './index.html',
   './css/style.css',
+  './js/config.js',
   './js/app.js',
   './js/recipes.js',
   './manifest.json',
@@ -73,5 +74,35 @@ self.addEventListener('fetch', (e) => {
     }
     res = await net.catch(() => null);
     return res || new Response('오프라인 상태입니다.', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+  })());
+});
+
+// ---------- 웹 푸시: 하루 1회 소비기한 임박 요약 ----------
+// Edge Function이 보내는 데이터: { title, body, tag, url }
+self.addEventListener('push', (e) => {
+  let data = {};
+  try { data = e.data ? e.data.json() : {}; } catch (err) { data = { body: e.data ? e.data.text() : '' }; }
+  const scope = self.registration.scope; // GitHub Pages 하위 경로(/fridge/)도 그대로 유지
+  const title = data.title || '냉털집사';
+  e.waitUntil(self.registration.showNotification(title, {
+    body: data.body || '먼저 써야 할 재료를 확인해 보세요',
+    icon: new URL('./icons/icon-192.png', scope).href,
+    badge: new URL('./icons/icon-192.png', scope).href,
+    tag: data.tag || 'fridge-daily',
+    renotify: true,
+    data: { url: new URL(data.url || './', scope).href }
+  }));
+});
+
+// 알림을 누르면 열려 있는 앱 창으로 이동, 없으면 새로 열기
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const target = (e.notification.data && e.notification.data.url) || self.registration.scope;
+  e.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const w of wins) {
+      if (w.url.startsWith(self.registration.scope) && 'focus' in w) { await w.focus(); return; }
+    }
+    if (self.clients.openWindow) await self.clients.openWindow(target);
   })());
 });

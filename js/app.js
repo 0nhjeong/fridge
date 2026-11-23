@@ -7,7 +7,7 @@
  * 1. 상수 · 기본값
  * ========================================================= */
 const STORE_KEY = 'fridge-pwa-v1'; // 저장 데이터 이름 (바꾸면 기존 데이터를 못 읽으니 그대로 두기)
-const APP_VERSION = 'v6'; // 배포할 때 sw.js의 CACHE 숫자와 같이 올리기
+const APP_VERSION = 'v7'; // 배포할 때 sw.js의 CACHE 숫자와 같이 올리기
 const LOG_MAX = 1000; // 소진 기록 최대 보관 개수
 
 const CATEGORIES = [
@@ -20,6 +20,7 @@ const CATEGORIES = [
   { id: 'drink', name: '음료', emoji: '🧃' },
   { id: 'grain', name: '곡물·면·가공', emoji: '🍚' },
   { id: 'fruit', name: '과일', emoji: '🍎' },
+  { id: 'meal', name: '간편식·밀키트', emoji: '🍱' },
   { id: 'etc', name: '기타', emoji: '📦' }
 ];
 
@@ -37,12 +38,13 @@ const ZONE_TYPES = {
 
 // 보관 구역 × 카테고리 → 권장 소비기한(오늘 + N일)
 const DEFAULT_RULES = {
-  fridge: { meat: 3, veg: 5, root: 14, egg: 21, dairy: 7, sauce: 60, drink: 7, grain: 7, fruit: 7, etc: 7 },
-  freezer: { meat: 30, veg: 30, root: 30, egg: 30, dairy: 30, sauce: 30, drink: 30, grain: 30, fruit: 30, etc: 30 },
-  room: { meat: 1, veg: 3, root: 14, egg: 14, dairy: 3, sauce: 180, drink: 90, grain: 90, fruit: 5, etc: 30 }
+  fridge: { meat: 3, veg: 5, root: 14, egg: 21, dairy: 7, sauce: 60, drink: 7, grain: 7, fruit: 7, meal: 3, etc: 7 },
+  freezer: { meat: 30, veg: 30, root: 30, egg: 30, dairy: 30, sauce: 30, drink: 30, grain: 30, fruit: 30, meal: 30, etc: 30 },
+  // 간편식 실온은 도시락처럼 상하기 쉬운 것 기준 1일 (레토르트는 설정 기준표에서 늘려 쓰기)
+  room: { meat: 1, veg: 3, root: 14, egg: 14, dairy: 3, sauce: 180, drink: 90, grain: 90, fruit: 5, meal: 1, etc: 30 }
 };
 // 개봉 후 권장 사용 일수 (개봉일 + N일)
-const DEFAULT_OPEN_RULES = { meat: 2, veg: 3, root: 7, egg: 7, dairy: 5, sauce: 60, drink: 7, grain: 14, fruit: 3, etc: 30 };
+const DEFAULT_OPEN_RULES = { meat: 2, veg: 3, root: 7, egg: 7, dairy: 5, sauce: 60, drink: 7, grain: 14, fruit: 3, meal: 1, etc: 30 };
 // 냉동 → 냉장 해동 시 최대 일수
 const THAW_MAX = { meat: 2, veg: 2, etc: 3 };
 
@@ -112,6 +114,8 @@ function defaultState() {
     ui: { tab: 'fridge', zoneId: 'z_fridge', mode: 'slot', open: {}, recipeTag: 'all', recipeOwned: true, addMode: 'single', combo: [], lastZoneId: '', lastSlotId: '' },
     lastBackup: null,
     log: [], // 소진 기록: { id, name, cat, kind: 'eaten' | 'wasted', date }
+    // 소비기한 요약 알림 (preset: '0830' | '1700' | 'custom', hour: custom일 때 정시, daysBefore: 1~3)
+    notify: { enabled: false, preset: '0830', hour: 7, daysBefore: 3 },
     migrations: { kimchi: true } // 이미 적용된 데이터 업데이트 기록
   };
 }
@@ -156,6 +160,13 @@ function normalize(d) {
   });
   s.shopping = (Array.isArray(s.shopping) ? s.shopping : []).filter((x) => x && x.name).map((x) => ({ id: x.id || uid(), name: String(x.name), done: !!x.done }));
   s.freq = Array.isArray(d.freq) ? d.freq.filter((f) => f && f.name).map((f) => ({ ...f, id: f.id || uid() })) : base.freq;
+  const n = { ...base.notify, ...(d.notify || {}) };
+  s.notify = {
+    enabled: !!n.enabled,
+    preset: ['0830', '1700', 'custom'].includes(n.preset) ? n.preset : '0830',
+    hour: Number.isInteger(+n.hour) && +n.hour >= 0 && +n.hour <= 23 ? +n.hour : 7,
+    daysBefore: [1, 2, 3].includes(+n.daysBefore) ? +n.daysBefore : 3
+  };
   s.log = (Array.isArray(d.log) ? d.log : []).filter((x) => x && x.name && (x.kind === 'eaten' || x.kind === 'wasted') && isYmd(x.date)).slice(-LOG_MAX);
   if (!s.zones.find((z) => z.id === s.ui.zoneId && !z.hidden)) s.ui.zoneId = s.zones.find((z) => !z.hidden).id;
   return s;
@@ -177,7 +188,7 @@ function saveNow() {
   catch (e) { toast('저장하지 못했어요. 설정 → 백업 내보내기를 해 두세요.'); }
 }
 function save() { clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 120); }
-function commit() { save(); render(); }
+function commit() { save(); render(); schedulePushSync(); }
 window.addEventListener('pagehide', saveNow);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) saveNow();
@@ -215,6 +226,12 @@ function dueInfo(it) {
   const level = left === null ? 'none' : left <= 3 ? 'red' : left <= 7 ? 'yellow' : 'green';
   return { left, reason, level };
 }
+// 실제 기한 날짜(소비기한과 '개봉일 + N일' 중 빠른 날) — 푸시 요약용
+function dueDate(it) {
+  let d = it.expiry || '';
+  if (it.opened) { const o = addDays(it.opened, openDays(it.cat)); if (!d || o < d) d = o; }
+  return d;
+}
 function ddayText(l) {
   if (l === null) return '기한 없음';
   if (l > 0) return `D-${l}`;
@@ -234,6 +251,7 @@ function sortByDue(arr) {
 
 // 이름으로 카테고리 추측 (앞에 있는 분류가 우선)
 const CAT_KEYWORDS = [
+  ['meal', ['밀키트', '도시락', '간편식', '컵밥', '레토르트', '냉동볶음밥', '즉석국', '즉석찌개', 'HMR']],
   ['sauce', ['간장', '고추장', '된장', '쌈장', '소스', '케첩', '케찹', '마요', '드레싱', '식초', '참기름', '들기름', '올리고당', '물엿', '액젓', '젓갈', '새우젓', '맛술', '굴소스', '잼', '머스타드', '고춧가루']],
   ['egg', ['계란', '달걀', '메추리알', '유정란']],
   ['dairy', ['우유', '치즈', '요거트', '요구르트', '버터', '생크림', '두유']],
@@ -449,6 +467,141 @@ function toast(msg, actionLabel, actionFn) {
 }
 
 /* =========================================================
+ * 7-1. 소비기한 요약 웹 푸시 (Supabase + Web Push, 로그인 없음)
+ *  - 브라우저마다 device_id(UUID)와 비밀값을 자동 발급해 localStorage에 보관 (백업 JSON에는 안 들어감)
+ *  - 알림이 켜져 있으면 재료/설정이 바뀔 때 Supabase RPC upsert_push_device 로 요약을 올림
+ *  - 실제 발송은 Supabase Edge Function(send-daily-push)이 하루 1번 함
+ * ========================================================= */
+var PUSH_CFG = window.FRIDGE_CONFIG || {};
+var pushTimer = null; var pushLastSig = ''; var pushBusy = false;
+const DEVICE_ID_KEY = 'fridge-device-id';
+const DEVICE_SECRET_KEY = 'fridge-device-secret';
+const NOTIFY_PRESETS = { '0830': { h: 8, m: 30, label: '오전 8:30', sub: '아침·장보기 전' }, '1700': { h: 17, m: 0, label: '오후 5:00', sub: '저녁 준비 전' } };
+
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* 저장 불가 */ } }
+function newUuid() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+  const h = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+function deviceCreds() {
+  let id = lsGet(DEVICE_ID_KEY); let secret = lsGet(DEVICE_SECRET_KEY);
+  if (!id || !/^[0-9a-f-]{36}$/i.test(id)) { id = newUuid(); lsSet(DEVICE_ID_KEY, id); }
+  if (!secret || secret.length < 32) { secret = [...crypto.getRandomValues(new Uint8Array(24))].map((x) => x.toString(16).padStart(2, '0')).join(''); lsSet(DEVICE_SECRET_KEY, secret); }
+  return { id, secret };
+}
+deviceCreds(); // 앱을 처음 열 때 자동 발급
+
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const pushConfigured = () => /^https:\/\/\S+$/.test(PUSH_CFG.SUPABASE_URL || '') && (PUSH_CFG.SUPABASE_ANON_KEY || '').length > 20 && (PUSH_CFG.VAPID_PUBLIC_KEY || '').length > 40;
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+function supaBase() { return PUSH_CFG.SUPABASE_URL.replace(/\/+$/, ''); }
+function supaHeaders() { return { apikey: PUSH_CFG.SUPABASE_ANON_KEY, Authorization: `Bearer ${PUSH_CFG.SUPABASE_ANON_KEY}`, 'Content-Type': 'application/json' }; }
+function b64urlToU8(s) {
+  const b = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4));
+  return Uint8Array.from(b, (c) => c.charCodeAt(0));
+}
+function notifyTime() {
+  const p = NOTIFY_PRESETS[S.notify.preset];
+  return p ? { h: p.h, m: p.m } : { h: S.notify.hour, m: 0 };
+}
+function hourLabel(h) { return h === 0 ? '밤 12시' : h < 12 ? `오전 ${h}시` : h === 12 ? '낮 12시' : `오후 ${h - 12}시`; }
+function notifyTimeText() { const t = notifyTime(); const p = NOTIFY_PRESETS[S.notify.preset]; return p ? p.label : hourLabel(t.h); }
+// 서버에 올리는 요약: 남은 재료의 이름과 실제 기한만 (최대 300개)
+function itemsSummary() {
+  return S.items.filter((i) => i.count > 0).map((i) => ({ n: String(i.name).slice(0, 40), d: dueDate(i) }))
+    .filter((x) => x.d).sort((a, b) => (a.d < b.d ? -1 : 1)).slice(0, 300);
+}
+function withTimeout(p, ms, msg) { return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(msg || 'timeout')), ms))]); }
+async function swReg() { return withTimeout(navigator.serviceWorker.ready, 8000, 'sw_not_ready'); }
+async function ensureSubscription() {
+  const reg = await swReg();
+  const key = b64urlToU8(PUSH_CFG.VAPID_PUBLIC_KEY);
+  let sub = await reg.pushManager.getSubscription();
+  if (sub) {
+    // 키가 바뀌었으면 기존 구독을 지우고 새로 구독
+    const cur = sub.options && sub.options.applicationServerKey ? new Uint8Array(sub.options.applicationServerKey) : null;
+    if (cur && (cur.length !== key.length || cur.some((v, i) => v !== key[i]))) { await sub.unsubscribe(); sub = null; }
+  }
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+  return sub;
+}
+function schedulePushSync(delay = 1500) {
+  if (!S || !S.notify || !S.notify.enabled || !pushConfigured() || !pushSupported()) return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => { pushSync(false).catch((e) => console.warn('알림 동기화 실패', e)); }, delay);
+}
+async function pushSync(force) {
+  if (!S.notify.enabled || !pushConfigured() || !pushSupported()) return false;
+  if (Notification.permission !== 'granted') { S.notify.enabled = false; saveNow(); render(); toast('알림 권한이 꺼져 있어 요약 알림을 껐어요'); return false; }
+  const sub = await ensureSubscription();
+  const { id, secret } = deviceCreds();
+  const t = notifyTime();
+  const items = itemsSummary();
+  const subJson = sub.toJSON();
+  const sig = JSON.stringify([subJson.endpoint, t.h, t.m, S.notify.daysBefore, items]);
+  if (!force && sig === pushLastSig) return true; // 바뀐 게 없으면 서버 호출 안 함
+  const res = await fetch(`${supaBase()}/rest/v1/rpc/upsert_push_device`, {
+    method: 'POST', headers: supaHeaders(),
+    body: JSON.stringify({ p_device_id: id, p_secret: secret, p_subscription: subJson, p_notify_hour: t.h, p_notify_minute: t.m, p_days_before: S.notify.daysBefore, p_items_summary: items })
+  });
+  if (!res.ok) throw new Error(`sync_${res.status}`);
+  pushLastSig = sig;
+  return true;
+}
+async function enablePush() {
+  if (!pushSupported()) { toast(isIOS() && !isStandalone() ? "아이폰은 Safari 공유 → '홈 화면에 추가'로 설치한 앱에서 켜 주세요" : '이 브라우저는 푸시 알림을 지원하지 않아요'); return false; }
+  if (!pushConfigured()) { toast('관리자 설정이 필요해요: js/config.js에 Supabase·VAPID 키를 넣어 주세요'); return false; }
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') { toast('알림 권한이 허용되지 않았어요. 브라우저 설정에서 알림을 허용해 주세요'); return false; }
+  try {
+    await ensureSubscription();
+    S.notify.enabled = true; saveNow();
+    await pushSync(true);
+    toast(`매일 ${notifyTimeText()}에 임박 재료를 알려 드릴게요`);
+    return true;
+  } catch (e) {
+    console.warn(e);
+    S.notify.enabled = false; saveNow();
+    toast(e.message === 'sw_not_ready' ? '앱 준비가 덜 됐어요. 잠시 후 다시 켜 주세요' : '알림을 켜지 못했어요. 인터넷 연결을 확인해 주세요');
+    return false;
+  }
+}
+async function disablePush() {
+  S.notify.enabled = false; saveNow(); pushLastSig = '';
+  clearTimeout(pushTimer);
+  try {
+    const reg = await swReg(); const sub = await reg.pushManager.getSubscription(); if (sub) await sub.unsubscribe();
+  } catch (e) { /* 구독이 없거나 SW 미준비 */ }
+  if (pushConfigured()) {
+    const { id, secret } = deviceCreds();
+    fetch(`${supaBase()}/rest/v1/rpc/disable_push_device`, { method: 'POST', headers: supaHeaders(), body: JSON.stringify({ p_device_id: id, p_secret: secret }) }).catch(() => {});
+  }
+  toast('요약 알림을 껐어요');
+}
+async function sendTestPush() {
+  if (!S.notify.enabled) { toast('먼저 요약 알림을 켜 주세요'); return; }
+  if (pushBusy) return;
+  pushBusy = true;
+  try {
+    await pushSync(true);
+    const { id, secret } = deviceCreds();
+    const res = await fetch(`${supaBase()}/functions/v1/send-daily-push`, { method: 'POST', headers: supaHeaders(), body: JSON.stringify({ mode: 'test', device_id: id, secret }) });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.ok) toast('테스트 알림을 보냈어요. 잠시 후 도착해요');
+    else if (data.error === 'subscription_gone') { toast('구독이 만료됐어요. 알림을 껐다가 다시 켜 주세요'); }
+    else toast(`테스트 알림 실패 (${data.error || res.status})`);
+  } catch (e) {
+    toast('테스트 알림을 보내지 못했어요. 인터넷 연결이나 서버 설정을 확인해 주세요');
+  } finally { pushBusy = false; }
+}
+window.addEventListener('online', () => schedulePushSync(500));
+
+/* =========================================================
  * 8. 화면 렌더링
  * ========================================================= */
 const TITLES = { fridge: '우리집 냉장고', add: '재료 등록', recipe: '오늘 뭐 먹지?', shop: '장보기', settings: '설정' };
@@ -617,7 +770,7 @@ function itemMenu(id) {
       else if (m === 'open') {
         if (!it.opened) { it.opened = todayStr(); closeSheet(); commit(); toast(`${it.name} 오늘 개봉으로 기록했어요`); }
         else openedSheet(it);
-      } else if (m === 'plus') { it.count = Math.round((it.count + 1) * 10) / 10; closeSheet(); commit(); toast(`${it.name} ${fmtNum(it.count)}${unit}`); }
+      } else if (m === 'plus') { it.count = Math.round((it.count + 1) * 10) / 10; closeSheet(); commit(); toast(`남은 ${it.name} ${fmtNum(it.count)}${unit}`); }
       else if (m === 'shop') { const ok = addToShopping(it.name); closeSheet(); commit(); toast(ok ? '장보기 목록에 담았어요' : '이미 장보기 목록에 있어요'); }
       else if (m === 'del') finishSheet(it, true);
     });
@@ -664,8 +817,10 @@ function useAmount(id, amt) {
   const before = it.count;
   it.count = Math.max(0, Math.round((it.count - amt) * 10) / 10);
   commit();
-  if (it.count === 0) finishSheet(it, false);
-  else toast(`${it.name} 남은 ${fmtNum(it.count)}${it.unit}`, '취소', () => { it.count = before; commit(); });
+  if (it.count === 0) {
+    finishSheet(it, false);
+    toast(`${it.name} 사용 완료`, '취소', () => { it.count = before; closeSheet(); commit(); });
+  } else toast(`남은 ${it.name} ${fmtNum(it.count)}${it.unit}`, '취소', () => { it.count = before; commit(); });
 }
 function useOne(id) { useAmount(id, 1); }
 
@@ -837,7 +992,7 @@ function bindItemForm(form, it, onSave) {
     const d = ruleDays(z.type, cat);
     const madeOn = f.madeOn.checked && isYmd(f.made.value);
     const base = madeOn ? f.made.value : todayStr();
-    form.querySelector('.exp-hint').textContent = `· 추천: ${ZONE_TYPES[z.type].name} ${CAT[cat].name} ${madeOn ? '만든 날' : ''} +${d}일`;
+    form.querySelector('.exp-hint').textContent = `· 추천: ${ZONE_TYPES[z.type].name} ${CAT[cat].name}${madeOn ? ' 만든 날' : ''} +${d}일`;
     form.querySelector('.made-wrap').hidden = !f.madeOn.checked;
     if (!expTouched) f.expiry.value = addDays(base, d);
     const showOpen = (sl && sl.door) || ['sauce', 'drink', 'dairy'].includes(cat) || !!f.opened.value;
@@ -1038,9 +1193,52 @@ let deferredInstall = null;
 window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferredInstall = e; if (S.ui.tab === 'settings') render(); });
 window.addEventListener('appinstalled', () => { deferredInstall = null; toast('홈 화면에 설치됐어요!'); });
 
+function notifySection() {
+  const n = S.notify;
+  const ready = pushConfigured();
+  const status = !pushSupported() ? (isIOS() && !isStandalone() ? '홈 화면에 추가한 앱에서 켤 수 있어요' : '이 브라우저는 푸시를 지원하지 않아요')
+    : !ready ? '관리자 설정 필요 (js/config.js)'
+      : n.enabled ? `매일 ${notifyTimeText()} · ${n.daysBefore}일 이내 임박 재료` : '꺼져 있어요';
+  const hours = Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${n.hour === h ? 'selected' : ''}>${hourLabel(h)}</option>`).join('');
+  return `<h2 class="sec">소비기한 알림 <small>하루 1번 요약</small></h2><div class="card form">
+    <div class="toggle-row"><span class="t">임박 재료 요약 알림<small>${esc(status)}</small></span>
+      <label class="switch"><input type="checkbox" id="pushToggle" ${n.enabled ? 'checked' : ''} aria-label="소비기한 요약 알림"><i></i></label></div>
+    <div class="fld"><span>알림 시간</span>
+      <div class="chips">
+        <button type="button" class="chip ${n.preset === '0830' ? 'on' : ''}" data-act="notifyPreset" data-p="0830">오전 8:30 (아침·장보기 전)</button>
+        <button type="button" class="chip ${n.preset === '1700' ? 'on' : ''}" data-act="notifyPreset" data-p="1700">오후 5:00 (저녁 준비 전)</button>
+        <button type="button" class="chip ${n.preset === 'custom' ? 'on' : ''}" data-act="notifyPreset" data-p="custom">직접 시간 선택(정시)</button>
+      </div>
+      ${n.preset === 'custom' ? `<select id="notifyHour" aria-label="알림 받을 시각">${hours}</select>` : ''}
+    </div>
+    <div class="fld"><span>임박 기준</span>
+      <div class="seg" style="margin:0">${[1, 2, 3].map((d) => `<button type="button" data-act="notifyDays" data-d="${d}" class="${n.daysBefore === d ? 'on' : ''}">${d === 1 ? '1일 전(당일 포함)' : `${d}일 전 이내`}</button>`).join('')}</div>
+    </div>
+    <button type="button" class="btn ghost block" data-act="pushTest" ${n.enabled ? '' : 'disabled'}>테스트 알림 바로 보내기</button>
+    <p class="hint" style="margin:0">아이폰은 Safari 공유 버튼 → '홈 화면에 추가'로 설치한 앱에서 알림을 켜야 푸시가 와요</p>
+  </div>`;
+}
+
+// 쿠팡 파트너스 추천 (공정위 고지 문구 필수 · 쿠팡 로고/로켓 이미지 사용 안 함)
+const PICKS = [
+  { name: '락앤락 프리저핏 냉동실 정리용기 6종 세트', desc: '투명하고 겹쳐 쌓기 좋은 냉동실 소분 필수템', url: 'https://link.coupang.com/a/iUa3nVY2FM' },
+  { name: '노아브 세제로 지워지는 키친마카 + 자석홀더 + 라벨지', desc: '냉장고에 붙여 두고 용기 날짜·재료명 적기 딱!', url: 'https://link.coupang.com/a/iUa6AlTqa4' },
+  { name: 'EZn 이지엔 스탠다드 더블지퍼백 200매 혼합팩 (소·중·대)', desc: '고기·야채 크기별로 쟁여두기 좋은 냉장·냉동 겸용', url: 'https://link.coupang.com/a/iUa7R6Q1ca' }
+];
+function picksSection() {
+  return `<h2 class="sec">🧊 집사가 쓰는 소분·정리템</h2>
+    <p class="hint disclosure">이 영역은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다.</p>
+    <div class="picks">${PICKS.map((p) => `<div class="card pick">
+      <div class="pick-txt"><strong>${esc(p.name)}</strong><span>${esc(p.desc)}</span></div>
+      <a class="btn sm ghost" href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">쿠팡에서 보기 ↗</a>
+    </div>`).join('')}</div>`;
+}
+
 function viewSettings() {
   const standalone = window.matchMedia('(display-mode: standalone)').matches;
   let h = `<h2 class="sec" style="margin-top:4px">이번 달 살림 성적</h2>${statCard(false)}`;
+  h += notifySection();
+  h += picksSection();
   h += `<h2 class="sec">보관 구역 <small>김치냉장고·보조냉동고 추가 가능</small></h2><div class="card">`;
   h += S.zones.map((z, i) => `<div class="zone-row" data-zid="${z.id}">
       <input value="${esc(z.name)}" data-zf="name" aria-label="구역 이름">
@@ -1078,6 +1276,14 @@ function viewSettings() {
 function mountSettings(v) {
   const acc = $('#rulesAcc', v);
   if (acc) acc.addEventListener('toggle', () => { S.ui.rulesOpen = acc.open; }); // 화면을 다시 그려도 펼친 상태 유지 (기본은 접힘)
+  const pt = $('#pushToggle', v);
+  if (pt) pt.addEventListener('change', async () => {
+    pt.disabled = true;
+    if (pt.checked) { const ok = await enablePush(); pt.checked = ok; } else await disablePush();
+    render();
+  });
+  const nh = $('#notifyHour', v);
+  if (nh) nh.addEventListener('change', () => { S.notify.hour = +nh.value; commit(); });
   // 구역 이름/종류 변경
   v.querySelectorAll('.zone-row[data-zid]').forEach((row) => {
     const z = zoneById(row.dataset.zid);
@@ -1195,6 +1401,9 @@ function addSlotPrompt(zid) {
  * 9. 클릭 이벤트 (이벤트 위임)
  * ========================================================= */
 const ACTIONS = {
+  notifyPreset(el) { S.notify.preset = el.dataset.p; commit(); },
+  notifyDays(el) { S.notify.daysBefore = +el.dataset.d; commit(); },
+  pushTest() { sendTestPush(); },
   tab(el) { S.ui.tab = el.dataset.tab; save(); render(); window.scrollTo(0, 0); },
   zone(el) { S.ui.zoneId = el.dataset.zone; commit(); },
   mode(el) { S.ui.mode = el.dataset.mode; commit(); },
@@ -1280,6 +1489,7 @@ document.addEventListener('click', (e) => {
  * 10. 시작
  * ========================================================= */
 render();
+schedulePushSync(3000); // 앱을 열 때 구독·요약을 한 번 맞춰 둠 (바뀐 게 없으면 서버 호출 안 함)
 if ('serviceWorker' in navigator) {
   // 새 버전이 설치되면 한 번 자동 새로고침 → 앱을 껐다 켜지 않아도 바로 최신 화면
   const hadController = !!navigator.serviceWorker.controller;
