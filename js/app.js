@@ -7,7 +7,7 @@
  * 1. 상수 · 기본값
  * ========================================================= */
 const STORE_KEY = 'fridge-pwa-v1'; // 저장 데이터 이름 (바꾸면 기존 데이터를 못 읽으니 그대로 두기)
-const APP_VERSION = 'v9'; // 배포할 때 sw.js의 CACHE 숫자와 같이 올리기
+const APP_VERSION = 'v10'; // 배포할 때 sw.js의 CACHE 숫자와 같이 올리기
 const LOG_MAX = 1000; // 소진 기록 최대 보관 개수
 
 const CATEGORIES = [
@@ -555,6 +555,7 @@ function pushErrorText(e) {
   const b = browserKind();
   if (m === 'permission_denied') return `알림이 '차단'으로 되어 있어요. ${permissionHelp(true)} [permission_denied · ${perm} · ${b}]`;
   if (m === 'permission_timeout') return `알림 권한 요청 창이 뜨지 않았어요. ${permissionHelp(false)} [permission_timeout · ${perm} · ${b}]`;
+  if (/^bad_subscription_keys/.test(m)) return `이 브라우저가 알림 등록 정보를 잘못 만들었어요. 스위치를 껐다가 다시 켜 보고, 계속되면 크롬으로 설치해 주세요 [${m} · ${browserKind()}]`;
   if (m === 'sw_not_ready') return '앱 준비(서비스 워커)가 아직 안 됐어요. 앱을 완전히 닫았다 다시 열어 주세요 [sw_not_ready]';
   if (m === 'subscribe_timeout') return "푸시 서비스가 응답하지 않아요. 폰 설정 → 애플리케이션 → 크롬(또는 냉털집사) → 알림 허용, 절전·데이터 절약 모드 해제 후 다시 시도해 주세요 [subscribe_timeout]";
   if (name === 'NotAllowedError') return `알림 권한이 막혀 있어요. 폰 설정에서 알림을 허용해 주세요 [${name}]`;
@@ -563,6 +564,30 @@ function pushErrorText(e) {
   if (/^sync_(timeout|network)$/.test(m) || name === 'TypeError') return `서버에 연결하지 못했어요. 인터넷 연결을 확인해 주세요 [${m}]`;
   if (/^sync_\d+/.test(m)) return `서버 저장에 실패했어요 [${m}]`;
   return `알림을 켜지 못했어요 [${name ? name + ': ' : ''}${m}]`.slice(0, 200);
+}
+// 구독 정보를 서버로 보낼 형태로 직접 만들기.
+// 일부 브라우저(삼성 인터넷 등)의 sub.toJSON()이 keys.auth를 잘못 돌려줘 발송이 실패한 적이 있어서,
+// getKey()로 원본 바이트를 받아 base64url로 직접 변환하고 길이를 검사함 (p256dh 65바이트, auth 16바이트).
+function bufToB64url(buf) {
+  const b = new Uint8Array(buf); let s = '';
+  for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function subscriptionJson(sub) {
+  let p256dh = null; let auth = null;
+  try { const k = sub.getKey && sub.getKey('p256dh'); if (k && k.byteLength) p256dh = bufToB64url(k); } catch (e) { /* 아래에서 대체 */ }
+  try { const k = sub.getKey && sub.getKey('auth'); if (k && k.byteLength) auth = bufToB64url(k); } catch (e) { /* 아래에서 대체 */ }
+  if (!p256dh || !auth) {
+    const j = (sub.toJSON && sub.toJSON()) || {};
+    const norm = (v) => (typeof v === 'string' ? v.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') : null);
+    p256dh = p256dh || norm(j.keys && j.keys.p256dh);
+    auth = auth || norm(j.keys && j.keys.auth);
+  }
+  const bytes = (s) => { try { return b64urlToU8(s).length; } catch (e) { return 0; } };
+  if (!sub.endpoint || bytes(p256dh) !== 65 || bytes(auth) !== 16) {
+    throw new Error(`bad_subscription_keys(p256dh:${bytes(p256dh)},auth:${bytes(auth)})`);
+  }
+  return { endpoint: sub.endpoint, expirationTime: sub.expirationTime ?? null, keys: { p256dh, auth } };
 }
 async function ensureSubscription() {
   setPushStep('(1/3 앱 준비 확인)');
@@ -593,7 +618,7 @@ async function pushSync(force) {
   const { id, secret } = deviceCreds();
   const t = notifyTime();
   const items = itemsSummary();
-  const subJson = sub.toJSON();
+  const subJson = subscriptionJson(sub);
   const sig = JSON.stringify([subJson.endpoint, t.h, t.m, S.notify.daysBefore, items]);
   if (!force && sig === pushLastSig) return true; // 바뀐 게 없으면 서버 호출 안 함
   if (pushUi.busy) setPushStep('(3/3 서버에 저장)');
