@@ -7,7 +7,7 @@
  * 1. 상수 · 기본값
  * ========================================================= */
 const STORE_KEY = 'fridge-pwa-v1'; // 저장 데이터 이름 (바꾸면 기존 데이터를 못 읽으니 그대로 두기)
-const APP_VERSION = 'v8'; // 배포할 때 sw.js의 CACHE 숫자와 같이 올리기
+const APP_VERSION = 'v9'; // 배포할 때 sw.js의 CACHE 숫자와 같이 올리기
 const LOG_MAX = 1000; // 소진 기록 최대 보관 개수
 
 const CATEGORIES = [
@@ -520,11 +520,41 @@ function withTimeout(p, ms, msg) { return Promise.race([p, new Promise((_, rej) 
 async function swReg() { return withTimeout(navigator.serviceWorker.ready, 8000, 'sw_not_ready'); }
 // 알림 켜기 진행 상태 (설정 화면에 그대로 보여 줌 — 어디서 막혔는지 알 수 있게)
 var pushUi = { busy: false, step: '', error: '' };
-function setPushStep(step) { pushUi.step = step; const el = document.getElementById('pushStatus'); if (el) el.textContent = `켜는 중… ${step}`; }
+// 알림을 '켜는 중'일 때만 단계 표시 (테스트 발송 등 다른 동작에서는 상태 글자를 바꾸지 않음)
+function setPushStep(step) { if (!pushUi.busy) return; pushUi.step = step; const el = document.getElementById('pushStatus'); if (el) el.textContent = `켜는 중… ${step}`; }
+// 어떤 브라우저로 설치·실행했는지 (권한 위치가 브라우저마다 다름)
+function browserKind() {
+  const ua = navigator.userAgent || '';
+  if (/SamsungBrowser\//.test(ua)) return 'samsung';
+  if (isIOS()) return 'ios';
+  if (/Android/.test(ua) && /Chrome\//.test(ua) && !/EdgA|OPR|Whale|YaBrowser/.test(ua)) return 'chrome';
+  return 'other';
+}
+// 브라우저별 알림 허용 방법 (설치한 앱 안에서는 허용 창이 안 보일 수 있어서, 같은 브라우저의 일반 화면에서 허용)
+function permissionHelp(blocked) {
+  const url = location.host + location.pathname.replace(/index\.html$/, '');
+  switch (browserKind()) {
+    case 'samsung':
+      return `① 삼성 인터넷 브라우저(냉털집사 아이콘 말고)를 열고 ${url} 에 들어가세요. ` +
+        `② 주소창 왼쪽 자물쇠 아이콘 → 알림 → 허용 (또는 설정에서 이 스위치를 켜고 '허용'). ` +
+        "③ 폰 설정 → 알림 → 앱 알림에서 '삼성 인터넷'이 켜져 있는지 확인 ④ 앱으로 돌아와 다시 켜기";
+    case 'chrome':
+      return `① 크롬 브라우저(냉털집사 아이콘 말고)로 ${url} 을 열고 주소창 왼쪽 아이콘 → 권한 → 알림 → 허용 (또는 이 스위치를 켜고 '허용'). ` +
+        "크롬 ⋮ → 설정 → 사이트 설정 → 알림의 '조용한 메시지 사용'은 꺼 두면 좋아요. ② 앱으로 돌아와 다시 켜기";
+    case 'ios':
+      return "아이폰은 Safari 공유 버튼 → '홈 화면에 추가'로 설치한 앱에서 켜고, 설정 → 알림 → 냉털집사에서 알림을 허용하세요.";
+    default:
+      return `이 앱을 설치한 브라우저로 ${url} 을 열어 사이트 알림을 허용한 뒤, 앱에서 다시 켜 주세요.`;
+  }
+}
 // 오류를 사람이 읽을 수 있는 말로 (코드도 함께 보여 줘서 문의할 때 쓸 수 있게)
 function pushErrorText(e) {
   const m = (e && (e.message || e.name)) || String(e);
   const name = (e && e.name) || '';
+  const perm = ('Notification' in window) ? Notification.permission : 'none';
+  const b = browserKind();
+  if (m === 'permission_denied') return `알림이 '차단'으로 되어 있어요. ${permissionHelp(true)} [permission_denied · ${perm} · ${b}]`;
+  if (m === 'permission_timeout') return `알림 권한 요청 창이 뜨지 않았어요. ${permissionHelp(false)} [permission_timeout · ${perm} · ${b}]`;
   if (m === 'sw_not_ready') return '앱 준비(서비스 워커)가 아직 안 됐어요. 앱을 완전히 닫았다 다시 열어 주세요 [sw_not_ready]';
   if (m === 'subscribe_timeout') return "푸시 서비스가 응답하지 않아요. 폰 설정 → 애플리케이션 → 크롬(또는 냉털집사) → 알림 허용, 절전·데이터 절약 모드 해제 후 다시 시도해 주세요 [subscribe_timeout]";
   if (name === 'NotAllowedError') return `알림 권한이 막혀 있어요. 폰 설정에서 알림을 허용해 주세요 [${name}]`;
@@ -557,7 +587,8 @@ function schedulePushSync(delay = 1500) {
 }
 async function pushSync(force) {
   if (!S.notify.enabled || !pushConfigured() || !pushSupported()) return false;
-  if (Notification.permission !== 'granted') { S.notify.enabled = false; saveNow(); render(); toast('알림 권한이 꺼져 있어 요약 알림을 껐어요'); return false; }
+  // 'denied'일 때만 끔 (일부 안드로이드 설치 앱은 허용돼 있어도 'default'로 보고하는 경우가 있음)
+  if (Notification.permission === 'denied') { S.notify.enabled = false; saveNow(); render(); toast('알림 권한이 꺼져 있어 요약 알림을 껐어요'); return false; }
   const sub = await ensureSubscription();
   const { id, secret } = deviceCreds();
   const t = notifyTime();
@@ -585,8 +616,20 @@ async function enablePush() {
   pushUi = { busy: true, step: '', error: '' };
   try {
     setPushStep('(권한 확인)');
-    const perm = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
-    if (perm !== 'granted') throw Object.assign(new Error('permission_' + perm), { name: 'NotAllowedError' });
+    let perm = Notification.permission;
+    if (perm === 'denied') throw new Error('permission_denied');
+    if (perm !== 'granted') {
+      // 안드로이드 설치 앱에서는 '조용한 권한 요청'이 화면에 안 보여 대답이 영영 안 올 수 있음 → 10초 제한
+      perm = await withTimeout(Notification.requestPermission(), 10000, 'permission_timeout')
+        .catch((e) => { if (e && e.message === 'permission_timeout') return 'timeout'; throw e; });
+      if (perm === 'denied') throw new Error('permission_denied');
+      if (perm !== 'granted') {
+        // 대체 경로: 크롬은 푸시 등록(subscribe)이 권한 요청을 함께 처리하기도 해서 한 번 더 시도
+        setPushStep('(권한 확인 · 다른 방법으로 다시 시도)');
+        try { await ensureSubscription(); }
+        catch (e) { throw new Error(Notification.permission === 'denied' ? 'permission_denied' : 'permission_timeout'); }
+      }
+    }
     await ensureSubscription();
     S.notify.enabled = true; saveNow();
     await pushSync(true);
@@ -617,17 +660,30 @@ async function sendTestPush() {
   if (!S.notify.enabled) { toast(pushUi.busy ? '알림을 켜는 중이에요. 잠시만 기다려 주세요' : "먼저 위의 '임박 재료 요약 알림' 스위치를 켜 주세요"); return; }
   if (pushBusy) return;
   pushBusy = true;
+  const btn = document.querySelector('[data-act=pushTest]');
+  if (btn) { btn.disabled = true; btn.textContent = '테스트 알림 보내는 중…'; }
+  let ok = false; let msg = '';
   try {
     await pushSync(true);
     const { id, secret } = deviceCreds();
-    const res = await fetch(`${supaBase()}/functions/v1/send-daily-push`, { method: 'POST', headers: supaHeaders(), body: JSON.stringify({ mode: 'test', device_id: id, secret }) });
+    const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 20000);
+    let res;
+    try { res = await fetch(`${supaBase()}/functions/v1/send-daily-push`, { method: 'POST', headers: supaHeaders(), signal: ctrl.signal, body: JSON.stringify({ mode: 'test', device_id: id, secret }) }); }
+    catch (e) { throw new Error(e && e.name === 'AbortError' ? 'sync_timeout' : 'sync_network'); }
+    finally { clearTimeout(timer); }
     const data = await res.json().catch(() => ({}));
-    if (res.ok && data.ok) toast('테스트 알림을 보냈어요. 잠시 후 도착해요');
-    else if (data.error === 'subscription_gone') { toast('구독이 만료됐어요. 알림을 껐다가 다시 켜 주세요'); }
-    else toast(`테스트 알림 실패 (${data.error || res.status})`);
+    if (res.ok && data.ok) { ok = true; msg = '테스트 알림을 보냈어요. 몇 초 안에 알림이 와요'; }
+    else if (data.error === 'subscription_gone') msg = '알림 등록이 만료됐어요. 스위치를 껐다가 다시 켜 주세요 [subscription_gone]';
+    else if (data.error === 'not_registered') msg = '서버에 이 기기가 등록되지 않았어요. 스위치를 껐다가 다시 켜 주세요 [not_registered]';
+    else msg = `테스트 알림을 보내지 못했어요 [${data.error || res.status}]`;
   } catch (e) {
-    toast('테스트 알림을 보내지 못했어요. 인터넷 연결이나 서버 설정을 확인해 주세요');
-  } finally { pushBusy = false; }
+    msg = pushErrorText(e);
+  } finally {
+    pushBusy = false;
+    pushUi.test = { ok, msg };
+    toast(msg);
+    if (S.ui.tab === 'settings') render(); else if (btn) { btn.disabled = false; btn.textContent = '테스트 알림 바로 보내기'; }
+  }
 }
 window.addEventListener('online', () => schedulePushSync(500));
 
@@ -1247,6 +1303,7 @@ function notifySection() {
       <div class="seg" style="margin:0">${[1, 2, 3].map((d) => `<button type="button" data-act="notifyDays" data-d="${d}" class="${n.daysBefore === d ? 'on' : ''}">${d === 1 ? '1일 전(당일 포함)' : `${d}일 전 이내`}</button>`).join('')}</div>
     </div>
     <button type="button" class="btn ghost block" data-act="pushTest">테스트 알림 바로 보내기</button>
+    ${pushUi.test && pushUi.test.msg ? `<p class="${pushUi.test.ok ? 'hint' : 'push-error'}" style="margin:0">${esc(pushUi.test.msg)}</p>` : ''}
     <p class="hint" style="margin:0">아이폰은 Safari 공유 버튼 → '홈 화면에 추가'로 설치한 앱에서 알림을 켜야 푸시가 와요</p>
   </div>`;
 }
